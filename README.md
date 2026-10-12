@@ -51,10 +51,13 @@ The apply job shows the result line, the apply log and the outputs.
 name: Infrastructure
 on:
   pull_request:          # remove this trigger to disable PR plans and comments
-    paths: ["repositories/**"]
+    paths:
+      - repositories/**
   push:
-    branches: [main]
-    paths: ["repositories/**"]
+    branches:
+      - main
+    paths:
+      - repositories/**
   workflow_dispatch:
 
 permissions:
@@ -121,13 +124,25 @@ It also selects the GitHub environment for the apply job, so `prod` can require 
 jobs:
   dev:
     uses: Crafted-Beyond/github-action-workflow/.github/workflows/tofu.yml@main
-    with: { state_repository: Crafted-Beyond/github-terraform-backend, environment: dev, var_file: envs/dev.tfvars }
-    secrets: { state_repo_token: "${{ secrets.GH_TOKEN }}", tofu_env: "TF_VAR_github_token=${{ secrets.GH_TOKEN }}" }
+    with:
+      state_repository: Crafted-Beyond/github-terraform-backend
+      environment: dev
+      var_file: envs/dev.tfvars
+    secrets:
+      state_repo_token: ${{ secrets.GH_TOKEN }}
+      tofu_env: |
+        TF_VAR_github_token=${{ secrets.GH_TOKEN }}
   prod:
     needs: dev   # promote in order; add test and preprod the same way
     uses: Crafted-Beyond/github-action-workflow/.github/workflows/tofu.yml@main
-    with: { state_repository: Crafted-Beyond/github-terraform-backend, environment: prod, var_file: envs/prod.tfvars }
-    secrets: { state_repo_token: "${{ secrets.GH_TOKEN }}", tofu_env: "TF_VAR_github_token=${{ secrets.GH_TOKEN }}" }
+    with:
+      state_repository: Crafted-Beyond/github-terraform-backend
+      environment: prod
+      var_file: envs/prod.tfvars
+    secrets:
+      state_repo_token: ${{ secrets.GH_TOKEN }}
+      tofu_env: |
+        TF_VAR_github_token=${{ secrets.GH_TOKEN }}
 ```
 
 | Environment | Branch | Plan | Apply |
