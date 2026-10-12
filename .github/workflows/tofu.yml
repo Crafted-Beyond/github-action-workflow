@@ -50,14 +50,21 @@ on:
         description: Comma separated environments allowed to plan and apply from any branch, for example a feature branch.
         type: string
         default: dev
+      github_token_env:
+        description: Optional variable name that receives GH_TOKEN, for example TF_VAR_github_token for the GitHub provider.
+        type: string
+        default: ""
       environment:
         description: Environment name, for example dev, test, preprod or prod. Selects a separate state folder (<state_path>/<environment>) and the GitHub environment for the apply job (manual approval).
         type: string
         default: ""
     secrets:
+      GH_TOKEN:
+        description: Fallback token used for the state repository (and the provider, see github_token_env) when the caller uses secrets inherit.
+        required: false
       state_repo_token:
-        description: Token with read and write access to the state repository.
-        required: true
+        description: Token with read and write access to the state repository. Defaults to GH_TOKEN.
+        required: false
       tofu_env:
         description: Optional KEY=VALUE lines exported to the job, for example TF_VAR_github_token=....
         required: false
@@ -88,7 +95,9 @@ jobs:
 
       - uses: Crafted-Beyond/github-action-workflow/.github/actions/load-env@main
         with:
-          env: ${{ secrets.tofu_env }}
+          env: |
+            ${{ secrets.tofu_env }}
+            ${{ inputs.github_token_env != '' && format('{0}={1}', inputs.github_token_env, secrets.GH_TOKEN) || '' }}
 
       - uses: Crafted-Beyond/github-action-workflow/.github/actions/setup-tofu@main
         with:
@@ -102,7 +111,7 @@ jobs:
       - uses: Crafted-Beyond/github-action-workflow/.github/actions/state-pull@main
         with:
           repository: ${{ inputs.state_repository }}
-          token: ${{ secrets.state_repo_token }}
+          token: ${{ secrets.state_repo_token || secrets.GH_TOKEN }}
           ref: ${{ inputs.state_ref }}
           state_path: ${{ env.STATE_PATH }}
           working_directory: ${{ inputs.working_directory }}
@@ -145,7 +154,9 @@ jobs:
 
       - uses: Crafted-Beyond/github-action-workflow/.github/actions/load-env@main
         with:
-          env: ${{ secrets.tofu_env }}
+          env: |
+            ${{ secrets.tofu_env }}
+            ${{ inputs.github_token_env != '' && format('{0}={1}', inputs.github_token_env, secrets.GH_TOKEN) || '' }}
 
       - uses: Crafted-Beyond/github-action-workflow/.github/actions/setup-tofu@main
         with:
@@ -159,7 +170,7 @@ jobs:
       - uses: Crafted-Beyond/github-action-workflow/.github/actions/state-pull@main
         with:
           repository: ${{ inputs.state_repository }}
-          token: ${{ secrets.state_repo_token }}
+          token: ${{ secrets.state_repo_token || secrets.GH_TOKEN }}
           ref: ${{ inputs.state_ref }}
           state_path: ${{ env.STATE_PATH }}
           working_directory: ${{ inputs.working_directory }}

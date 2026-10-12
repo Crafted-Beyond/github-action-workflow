@@ -89,6 +89,18 @@ jobs:
 | `apply_branch` | `main` | Only this branch may apply |
 | `environment` | none | GitHub environment for the apply job |
 
+### Secrets
+
+Either pass secrets explicitly (`state_repo_token`, `tofu_env`) or use `secrets: inherit` with a `GH_TOKEN` secret
+defined in the calling repo or shared to it from the organization. `GH_TOKEN` is used for the state repo, and when
+`github_token_env` is set (for example `TF_VAR_github_token`) it is also exported under that name for the provider.
+
+```yaml
+    with:
+      github_token_env: TF_VAR_github_token
+    secrets: inherit
+```
+
 ### Multiple environments (dev, test, preprod, prod)
 
 The `environment` input gives each environment its own state folder in the state repo:
