@@ -1,0 +1,62 @@
+name: OpenTofu validate
+description: Checks formatting (tofu fmt) and validates the configuration (tofu validate) without touching state or the backend.
+
+inputs:
+  working_directory:
+    description: Directory containing the OpenTofu configuration.
+    default: .
+  fmt_check:
+    description: Fail when files are not formatted with tofu fmt.
+    default: "true"
+
+runs:
+  using: composite
+  steps:
+    - name: Check format and validate
+      shell: bash
+      working-directory: ${{ inputs.working_directory }}
+      env:
+        FMT_CHECK: ${{ inputs.fmt_check }}
+      run: |
+        set +e
+        rc=0
+        {
+          echo "## ✅ OpenTofu validate"
+          echo
+        } >> "$GITHUB_STEP_SUMMARY"
+
+        echo "::group::tofu fmt -check"
+        fmt_out=$(tofu fmt -check -recursive -diff -no-color 2>&1)
+        fmt_rc=$?
+        echo "$fmt_out"
+        echo "::endgroup::"
+        if [ "$fmt_rc" -ne 0 ]; then
+          if [ "$FMT_CHECK" = "true" ]; then
+            echo "::error::Files are not formatted. Run 'tofu fmt -recursive' locally."
+            rc=1
+          else
+            echo "::warning::Files are not formatted. Run 'tofu fmt -recursive' locally."
+          fi
+        fi
+
+        echo "::group::tofu init -backend=false"
+        tofu init -backend=false -input=false -no-color
+        init_rc=$?
+        echo "::endgroup::"
+        val_rc=1
+        if [ "$init_rc" -eq 0 ]; then
+          echo "::group::tofu validate"
+          tofu validate -no-color
+          val_rc=$?
+          echo "::endgroup::"
+        fi
+        [ "$val_rc" -ne 0 ] && rc=1
+
+        {
+          echo "| Check | Result |"
+          echo "| :-- | :-- |"
+          echo "| Format | $([ "$fmt_rc" -eq 0 ] && echo '✅ formatted' || echo '⚠️ needs tofu fmt') |"
+          echo "| Validate | $([ "$val_rc" -eq 0 ] && echo '✅ valid' || echo '❌ invalid') |"
+          echo
+        } >> "$GITHUB_STEP_SUMMARY"
+        exit "$rc"

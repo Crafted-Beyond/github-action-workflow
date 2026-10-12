@@ -9,9 +9,11 @@ inputs:
 runs:
   using: composite
   steps:
-    - uses: opentofu/setup-opentofu@v1
+    - name: Install OpenTofu
+      uses: opentofu/setup-opentofu@v1
       with:
         tofu_version: ${{ inputs.tofu_version }}
         tofu_wrapper: false
-    - shell: bash
+    - name: Show OpenTofu version
+      shell: bash
       run: tofu version

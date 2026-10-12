@@ -27,7 +27,8 @@ inputs:
 runs:
   using: composite
   steps:
-    - shell: bash
+    - name: Commit and push state
+      shell: bash
       env:
         STATE_PATH: ${{ inputs.state_path }}
         REF: ${{ inputs.ref }}

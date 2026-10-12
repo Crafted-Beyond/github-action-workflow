@@ -17,7 +17,8 @@ outputs:
 runs:
   using: composite
   steps:
-    - id: apply
+    - name: Apply the saved plan
+      id: apply
       shell: bash
       working-directory: ${{ inputs.working_directory }}
       env:
@@ -26,6 +27,12 @@ runs:
         set +e
         log="$RUNNER_TEMP/tofu-apply.log"
         md="$RUNNER_TEMP/tofu-apply.md"
+
+        echo "-> Running an apply from a fresh plan"
+        if tofu show -json tfplan > "$RUNNER_TEMP/tofu-apply.json" 2>/dev/null && tofu show -no-color tfplan > "$RUNNER_TEMP/tofu-apply.txt" 2>/dev/null; then
+          bash "$GITHUB_ACTION_PATH/../tofu-plan/log.sh" "$RUNNER_TEMP/tofu-apply.json" "$RUNNER_TEMP/tofu-apply.txt" "Apply Summary"
+        fi
+        rm -f "$RUNNER_TEMP/tofu-apply.json"
 
         echo "::group::tofu apply"
         tofu apply -input=false -no-color tfplan 2>&1 | tee "$log"

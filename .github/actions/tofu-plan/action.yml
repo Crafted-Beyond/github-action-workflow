@@ -35,7 +35,8 @@ outputs:
 runs:
   using: composite
   steps:
-    - id: plan
+    - name: Init, validate and plan
+      id: plan
       shell: bash
       working-directory: ${{ inputs.working_directory }}
       env:
@@ -80,6 +81,7 @@ runs:
 
         if [ "$status" = ok ]; then
           counts=$(bash "$GITHUB_ACTION_PATH/summary.sh" "$json" "$txt" "$md" "$TITLE" ok)
+          bash "$GITHUB_ACTION_PATH/log.sh" "$json" "$txt" "Plan Summary"
         else
           bash "$GITHUB_ACTION_PATH/summary.sh" - "$log" "$md" "$TITLE" failed
         fi

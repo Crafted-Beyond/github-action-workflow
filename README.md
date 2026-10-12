@@ -17,6 +17,7 @@ one directory per stack, instead of in cloud storage.
 | `setup-tofu` | Installs OpenTofu |
 | `load-env` | Exports `KEY=VALUE` secrets (for example `TF_VAR_*`) to the job and masks them |
 | `state-pull` | Checks out the state repo and copies `<state_path>/terraform.tfstate` into the working directory |
+| `tofu-validate` | `tofu fmt -check` and `tofu validate` (no backend, no state), with a result table in the job summary |
 | `tofu-plan` | `init`, `validate`, `plan`, then writes the table and collapsible summary |
 | `tofu-apply` | Applies the saved plan and writes an apply summary |
 | `state-push` | Commits `terraform.tfstate` and `terraform.tfstate.backup` (the previous state) to the state repo, retrying on a concurrent push. Git history keeps every earlier version too |
@@ -85,7 +86,7 @@ jobs:
 | `tofu_version` | `latest` | OpenTofu version |
 | `runs_on` | `"ubuntu-latest"` | Runner labels as JSON |
 | `comment_on_pr` | `true` | Post the plan on pull requests |
-| `apply` | `true` | Set `false` for plan-only |
+| `action` | `apply` | `plan` runs Terraform Plan only and never applies. `apply` runs Terraform Plan, then Terraform Apply |
 | `apply_branch` | `main` | Only this branch may apply |
 | `environment` | none | GitHub environment for the apply job |
 

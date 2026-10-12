@@ -32,14 +32,16 @@ outputs:
 runs:
   using: composite
   steps:
-    - uses: actions/checkout@v4
+    - name: Check out the state repository
+      uses: actions/checkout@v4
       with:
         repository: ${{ inputs.repository }}
         ref: ${{ inputs.ref }}
         token: ${{ inputs.token }}
         path: ${{ inputs.checkout_path }}
         persist-credentials: ${{ inputs.persist_credentials == 'true' }}
-    - id: pull
+    - name: Copy state into the working directory
+      id: pull
       shell: bash
       env:
         STATE_PATH: ${{ inputs.state_path }}

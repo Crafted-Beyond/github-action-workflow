@@ -38,10 +38,12 @@ on:
         description: Post the plan as a pull request comment when triggered by a pull request.
         type: boolean
         default: true
-      apply:
-        description: Apply after a plan with changes on apply_branch.
-        type: boolean
-        default: true
+      action:
+        description: >
+          plan = run Terraform Plan only, never apply. apply = run Terraform Plan, then Terraform Apply
+          (still limited to apply_branch, or unrestricted_environments).
+        type: string
+        default: apply
       apply_branch:
         description: Branch that environments outside unrestricted_environments must run from.
         type: string
@@ -75,7 +77,7 @@ concurrency:
 
 jobs:
   plan:
-    name: Plan
+    name: Terraform Plan (${{ inputs.environment || 'default' }})
     # Pull requests from forks never receive secrets, so they are skipped.
     # Environments in unrestricted_environments (dev) run from any branch. Every other environment runs only from
     # apply_branch (main), or on pull requests that target it (plan only).
@@ -89,26 +91,36 @@ jobs:
     outputs:
       has_changes: ${{ steps.plan.outputs.has_changes }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout ${{ github.repository }}
+        uses: actions/checkout@v4
         with:
           persist-credentials: false
 
-      - uses: Crafted-Beyond/github-action-workflow/.github/actions/load-env@main
+      - name: Load Secrets (masked)
+        uses: Crafted-Beyond/github-action-workflow/.github/actions/load-env@main
         with:
           env: |
             ${{ secrets.tofu_env }}
             ${{ inputs.github_token_env != '' && format('{0}={1}', inputs.github_token_env, secrets.GH_TOKEN) || '' }}
 
-      - uses: Crafted-Beyond/github-action-workflow/.github/actions/setup-tofu@main
+      - name: Install OpenTofu (${{ inputs.tofu_version }})
+        uses: Crafted-Beyond/github-action-workflow/.github/actions/setup-tofu@main
         with:
           tofu_version: ${{ inputs.tofu_version }}
 
       # Provider binaries only. State and plans are never cached. Saved by the Post Cache step.
-      - uses: Crafted-Beyond/github-action-workflow/.github/actions/cache-providers@main
+      - name: Cache Terraform Providers
+        uses: Crafted-Beyond/github-action-workflow/.github/actions/cache-providers@main
         with:
           working_directory: ${{ inputs.working_directory }}
 
-      - uses: Crafted-Beyond/github-action-workflow/.github/actions/state-pull@main
+      - name: Terraform Format and Validate
+        uses: Crafted-Beyond/github-action-workflow/.github/actions/tofu-validate@main
+        with:
+          working_directory: ${{ inputs.working_directory }}
+
+      - name: Terraform State Pull (${{ env.STATE_PATH }})
+        uses: Crafted-Beyond/github-action-workflow/.github/actions/state-pull@main
         with:
           repository: ${{ inputs.state_repository }}
           token: ${{ secrets.state_repo_token || secrets.GH_TOKEN }}
@@ -117,30 +129,31 @@ jobs:
           working_directory: ${{ inputs.working_directory }}
           persist_credentials: "false"
 
-      - id: plan
+      - name: Terraform Plan (${{ env.STATE_PATH }})
+        id: plan
         uses: Crafted-Beyond/github-action-workflow/.github/actions/tofu-plan@main
         with:
           working_directory: ${{ inputs.working_directory }}
           var_file: ${{ inputs.var_file }}
           title: ${{ env.STATE_PATH }}
 
-      - name: Comment plan on the pull request
+      - name: Post Terraform Plan to Pull Request
         if: ${{ !cancelled() && github.event_name == 'pull_request' && inputs.comment_on_pr && steps.plan.outputs.summary_file != '' }}
         uses: Crafted-Beyond/github-action-workflow/.github/actions/pr-comment@main
         with:
           body_file: ${{ steps.plan.outputs.summary_file }}
           marker: tofu-plan:${{ env.STATE_PATH }}
 
-      - name: Cleanup
+      - name: Clean Up Secrets, State and Credentials
         if: ${{ always() }}
         uses: Crafted-Beyond/github-action-workflow/.github/actions/cleanup@main
         with:
           working_directory: ${{ inputs.working_directory }}
 
   apply:
-    name: Apply
+    name: Terraform Apply (${{ inputs.environment || 'default' }})
     needs: plan
-    if: ${{ inputs.apply && github.event_name != 'pull_request' && (contains(format(',{0},', inputs.unrestricted_environments), format(',{0},', inputs.environment)) || github.ref == format('refs/heads/{0}', inputs.apply_branch)) && needs.plan.outputs.has_changes == 'true' }}
+    if: ${{ inputs.action == 'apply' && github.event_name != 'pull_request' && (contains(format(',{0},', inputs.unrestricted_environments), format(',{0},', inputs.environment)) || github.ref == format('refs/heads/{0}', inputs.apply_branch)) && needs.plan.outputs.has_changes == 'true' }}
     runs-on: ${{ fromJSON(inputs.runs_on) }}
     environment: ${{ inputs.environment }}
     permissions:
@@ -148,26 +161,31 @@ jobs:
     env:
       STATE_PATH: ${{ format('{0}{1}', inputs.state_path || github.event.repository.name, inputs.environment != '' && format('/{0}', inputs.environment) || '') }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout ${{ github.repository }}
+        uses: actions/checkout@v4
         with:
           persist-credentials: false
 
-      - uses: Crafted-Beyond/github-action-workflow/.github/actions/load-env@main
+      - name: Load Secrets (masked)
+        uses: Crafted-Beyond/github-action-workflow/.github/actions/load-env@main
         with:
           env: |
             ${{ secrets.tofu_env }}
             ${{ inputs.github_token_env != '' && format('{0}={1}', inputs.github_token_env, secrets.GH_TOKEN) || '' }}
 
-      - uses: Crafted-Beyond/github-action-workflow/.github/actions/setup-tofu@main
+      - name: Install OpenTofu (${{ inputs.tofu_version }})
+        uses: Crafted-Beyond/github-action-workflow/.github/actions/setup-tofu@main
         with:
           tofu_version: ${{ inputs.tofu_version }}
 
       # Provider binaries only. State and plans are never cached. Saved by the Post Cache step.
-      - uses: Crafted-Beyond/github-action-workflow/.github/actions/cache-providers@main
+      - name: Cache Terraform Providers
+        uses: Crafted-Beyond/github-action-workflow/.github/actions/cache-providers@main
         with:
           working_directory: ${{ inputs.working_directory }}
 
-      - uses: Crafted-Beyond/github-action-workflow/.github/actions/state-pull@main
+      - name: Terraform State Pull (${{ env.STATE_PATH }})
+        uses: Crafted-Beyond/github-action-workflow/.github/actions/state-pull@main
         with:
           repository: ${{ inputs.state_repository }}
           token: ${{ secrets.state_repo_token || secrets.GH_TOKEN }}
@@ -176,21 +194,21 @@ jobs:
           working_directory: ${{ inputs.working_directory }}
 
       # Applying a fresh plan, so the apply always matches the current state and code.
-      - name: Fresh plan
+      - name: Terraform Plan (fresh, from current state)
         uses: Crafted-Beyond/github-action-workflow/.github/actions/tofu-plan@main
         with:
           working_directory: ${{ inputs.working_directory }}
           var_file: ${{ inputs.var_file }}
           title: ${{ env.STATE_PATH }}
 
-      - name: Apply
+      - name: Terraform Apply (${{ env.STATE_PATH }})
         uses: Crafted-Beyond/github-action-workflow/.github/actions/tofu-apply@main
         with:
           working_directory: ${{ inputs.working_directory }}
           title: ${{ env.STATE_PATH }}
 
       # Also runs after a failed apply so a partially applied state is not lost.
-      - name: Save state
+      - name: Terraform State Push (${{ env.STATE_PATH }})
         if: ${{ always() }}
         uses: Crafted-Beyond/github-action-workflow/.github/actions/state-push@main
         with:
@@ -198,7 +216,7 @@ jobs:
           ref: ${{ inputs.state_ref }}
           working_directory: ${{ inputs.working_directory }}
 
-      - name: Cleanup
+      - name: Clean Up Secrets, State and Credentials
         if: ${{ always() }}
         uses: Crafted-Beyond/github-action-workflow/.github/actions/cleanup@main
         with:

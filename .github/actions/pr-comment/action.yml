@@ -18,7 +18,8 @@ inputs:
 runs:
   using: composite
   steps:
-    - uses: actions/github-script@v7
+    - name: Create or update the PR comment
+      uses: actions/github-script@v7
       env:
         BODY_FILE: ${{ inputs.body_file }}
         MARKER: ${{ inputs.marker }}

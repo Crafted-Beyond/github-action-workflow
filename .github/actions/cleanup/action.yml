@@ -15,7 +15,8 @@ inputs:
 runs:
   using: composite
   steps:
-    - shell: bash
+    - name: Remove state, plans and credentials
+      shell: bash
       env:
         WORKDIR: ${{ inputs.working_directory }}
         CHECKOUT_PATH: ${{ inputs.checkout_path }}
