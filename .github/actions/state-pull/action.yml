@@ -1,0 +1,48 @@
+name: State pull
+description: Checks out the Git state repository and copies this stack's terraform.tfstate into the working directory (local backend).
+
+inputs:
+  repository:
+    description: State repository as owner/name.
+    required: true
+  token:
+    description: Token with read and write access to the state repository.
+    required: true
+  ref:
+    description: Branch of the state repository.
+    default: main
+  state_path:
+    description: Directory inside the state repository that holds this stack's state.
+    required: true
+  working_directory:
+    description: Directory containing the OpenTofu configuration.
+    default: .
+  checkout_path:
+    description: Where the state repository is checked out inside the workspace.
+    default: .tofu-state-repo
+  persist_credentials:
+    description: Keep the token in the checkout's git config. Only needed when the state will be pushed later.
+    default: "true"
+
+outputs:
+  state_exists:
+    description: "true when a state file already existed."
+    value: ${{ steps.pull.outputs.state_exists }}
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@v4
+      with:
+        repository: ${{ inputs.repository }}
+        ref: ${{ inputs.ref }}
+        token: ${{ inputs.token }}
+        path: ${{ inputs.checkout_path }}
+        persist-credentials: ${{ inputs.persist_credentials == 'true' }}
+    - id: pull
+      shell: bash
+      env:
+        STATE_PATH: ${{ inputs.state_path }}
+        CHECKOUT_PATH: ${{ inputs.checkout_path }}
+        WORKDIR: ${{ inputs.working_directory }}
+      run: bash "$GITHUB_ACTION_PATH/pull.sh"

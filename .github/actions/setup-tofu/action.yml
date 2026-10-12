@@ -1,0 +1,17 @@
+name: Setup OpenTofu
+description: Installs OpenTofu and prints its version.
+
+inputs:
+  tofu_version:
+    description: OpenTofu version to install, for example 1.11.6 or latest.
+    default: latest
+
+runs:
+  using: composite
+  steps:
+    - uses: opentofu/setup-opentofu@v1
+      with:
+        tofu_version: ${{ inputs.tofu_version }}
+        tofu_wrapper: false
+    - shell: bash
+      run: tofu version
