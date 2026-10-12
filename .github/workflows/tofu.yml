@@ -1,0 +1,188 @@
+name: OpenTofu
+
+# Reusable workflow: plan on pull requests (with a PR comment), plan + apply on the apply branch.
+# State lives in a Git repository, one directory per stack (local backend + Git, no cloud storage).
+
+on:
+  workflow_call:
+    inputs:
+      state_repository:
+        description: State repository as owner/name, for example Crafted-Beyond/github-terraform-backend.
+        type: string
+        required: true
+      state_path:
+        description: Directory in the state repository for this stack. Defaults to the calling repository name.
+        type: string
+        default: ""
+      state_ref:
+        description: Branch of the state repository.
+        type: string
+        default: main
+      working_directory:
+        description: Directory with the OpenTofu configuration.
+        type: string
+        default: .
+      var_file:
+        description: Optional -var-file, relative to working_directory.
+        type: string
+        default: ""
+      tofu_version:
+        description: OpenTofu version.
+        type: string
+        default: latest
+      runs_on:
+        description: 'Runner labels as JSON, for example ["self-hosted","linux"] for on-prem runners.'
+        type: string
+        default: '"ubuntu-latest"'
+      comment_on_pr:
+        description: Post the plan as a pull request comment when triggered by a pull request.
+        type: boolean
+        default: true
+      apply:
+        description: Apply after a plan with changes on apply_branch.
+        type: boolean
+        default: true
+      apply_branch:
+        description: Only this branch is allowed to apply.
+        type: string
+        default: main
+      environment:
+        description: Optional GitHub environment for the apply job, to require manual approval.
+        type: string
+        default: ""
+    secrets:
+      state_repo_token:
+        description: Token with read and write access to the state repository.
+        required: true
+      tofu_env:
+        description: Optional KEY=VALUE lines exported to the job, for example TF_VAR_github_token=....
+        required: false
+
+concurrency:
+  group: tofu-${{ inputs.state_repository }}-${{ inputs.state_path || github.event.repository.name }}
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    name: Plan
+    # Pull requests from forks never receive secrets, so they are skipped.
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ${{ fromJSON(inputs.runs_on) }}
+    permissions:
+      contents: read
+      pull-requests: write
+    env:
+      STATE_PATH: ${{ inputs.state_path || github.event.repository.name }}
+    outputs:
+      has_changes: ${{ steps.plan.outputs.has_changes }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: Crafted-Beyond/github-action-workflow/.github/actions/load-env@main
+        with:
+          env: ${{ secrets.tofu_env }}
+
+      - uses: Crafted-Beyond/github-action-workflow/.github/actions/setup-tofu@main
+        with:
+          tofu_version: ${{ inputs.tofu_version }}
+
+      # Provider binaries only. State and plans are never cached. Saved by the Post Cache step.
+      - uses: Crafted-Beyond/github-action-workflow/.github/actions/cache-providers@main
+        with:
+          working_directory: ${{ inputs.working_directory }}
+
+      - uses: Crafted-Beyond/github-action-workflow/.github/actions/state-pull@main
+        with:
+          repository: ${{ inputs.state_repository }}
+          token: ${{ secrets.state_repo_token }}
+          ref: ${{ inputs.state_ref }}
+          state_path: ${{ env.STATE_PATH }}
+          working_directory: ${{ inputs.working_directory }}
+          persist_credentials: "false"
+
+      - id: plan
+        uses: Crafted-Beyond/github-action-workflow/.github/actions/tofu-plan@main
+        with:
+          working_directory: ${{ inputs.working_directory }}
+          var_file: ${{ inputs.var_file }}
+          title: ${{ env.STATE_PATH }}
+
+      - name: Comment plan on the pull request
+        if: ${{ !cancelled() && github.event_name == 'pull_request' && inputs.comment_on_pr && steps.plan.outputs.summary_file != '' }}
+        uses: Crafted-Beyond/github-action-workflow/.github/actions/pr-comment@main
+        with:
+          body_file: ${{ steps.plan.outputs.summary_file }}
+          marker: tofu-plan:${{ env.STATE_PATH }}
+
+      - name: Cleanup
+        if: ${{ always() }}
+        uses: Crafted-Beyond/github-action-workflow/.github/actions/cleanup@main
+        with:
+          working_directory: ${{ inputs.working_directory }}
+
+  apply:
+    name: Apply
+    needs: plan
+    if: ${{ inputs.apply && github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', inputs.apply_branch) && needs.plan.outputs.has_changes == 'true' }}
+    runs-on: ${{ fromJSON(inputs.runs_on) }}
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+    env:
+      STATE_PATH: ${{ inputs.state_path || github.event.repository.name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: Crafted-Beyond/github-action-workflow/.github/actions/load-env@main
+        with:
+          env: ${{ secrets.tofu_env }}
+
+      - uses: Crafted-Beyond/github-action-workflow/.github/actions/setup-tofu@main
+        with:
+          tofu_version: ${{ inputs.tofu_version }}
+
+      # Provider binaries only. State and plans are never cached. Saved by the Post Cache step.
+      - uses: Crafted-Beyond/github-action-workflow/.github/actions/cache-providers@main
+        with:
+          working_directory: ${{ inputs.working_directory }}
+
+      - uses: Crafted-Beyond/github-action-workflow/.github/actions/state-pull@main
+        with:
+          repository: ${{ inputs.state_repository }}
+          token: ${{ secrets.state_repo_token }}
+          ref: ${{ inputs.state_ref }}
+          state_path: ${{ env.STATE_PATH }}
+          working_directory: ${{ inputs.working_directory }}
+
+      # Applying a fresh plan, so the apply always matches the current state and code.
+      - name: Fresh plan
+        uses: Crafted-Beyond/github-action-workflow/.github/actions/tofu-plan@main
+        with:
+          working_directory: ${{ inputs.working_directory }}
+          var_file: ${{ inputs.var_file }}
+          title: ${{ env.STATE_PATH }}
+
+      - name: Apply
+        uses: Crafted-Beyond/github-action-workflow/.github/actions/tofu-apply@main
+        with:
+          working_directory: ${{ inputs.working_directory }}
+          title: ${{ env.STATE_PATH }}
+
+      # Also runs after a failed apply so a partially applied state is not lost.
+      - name: Save state
+        if: ${{ always() }}
+        uses: Crafted-Beyond/github-action-workflow/.github/actions/state-push@main
+        with:
+          state_path: ${{ env.STATE_PATH }}
+          ref: ${{ inputs.state_ref }}
+          working_directory: ${{ inputs.working_directory }}
+
+      - name: Cleanup
+        if: ${{ always() }}
+        uses: Crafted-Beyond/github-action-workflow/.github/actions/cleanup@main
+        with:
+          working_directory: ${{ inputs.working_directory }}

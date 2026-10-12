@@ -1,0 +1,26 @@
+name: Load environment
+description: Exports KEY=VALUE lines (for example TF_VAR_* and provider tokens) to the job environment and masks the values.
+
+inputs:
+  env:
+    description: Newline separated KEY=VALUE pairs. Blank lines and lines starting with # are ignored.
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        TOFU_ENV: ${{ inputs.env }}
+      run: |
+        while IFS= read -r line || [ -n "$line" ]; do
+          case "$line" in ""|"#"*) continue ;; esac
+          key=${line%%=*}
+          value=${line#*=}
+          if ! [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+            echo "::error::Invalid environment variable name in tofu_env."
+            exit 1
+          fi
+          echo "::add-mask::$value"
+          { echo "$key<<__TOFU_ENV_EOF__"; echo "$value"; echo "__TOFU_ENV_EOF__"; } >> "$GITHUB_ENV"
+        done <<< "$TOFU_ENV"

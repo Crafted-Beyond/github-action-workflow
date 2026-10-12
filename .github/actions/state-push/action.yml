@@ -1,0 +1,39 @@
+name: State push
+description: Saves the working directory's terraform.tfstate to the Git state repository.
+
+inputs:
+  state_path:
+    description: Directory inside the state repository that holds this stack's state.
+    required: true
+  ref:
+    description: Branch of the state repository.
+    default: main
+  working_directory:
+    description: Directory containing the OpenTofu configuration.
+    default: .
+  checkout_path:
+    description: Where the state repository was checked out by state-pull.
+    default: .tofu-state-repo
+  message:
+    description: Commit message.
+    default: ""
+  git_user_name:
+    default: tofu-state[bot]
+    description: Commit author name.
+  git_user_email:
+    default: tofu-state@users.noreply.github.com
+    description: Commit author email.
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        STATE_PATH: ${{ inputs.state_path }}
+        REF: ${{ inputs.ref }}
+        WORKDIR: ${{ inputs.working_directory }}
+        CHECKOUT_PATH: ${{ inputs.checkout_path }}
+        GIT_USER_NAME: ${{ inputs.git_user_name }}
+        GIT_USER_EMAIL: ${{ inputs.git_user_email }}
+        MESSAGE: "${{ inputs.message || format('state: {0} ({1}@{2}, run {3}) [skip ci]', inputs.state_path, github.repository, github.sha, github.run_id) }}"
+      run: bash "$GITHUB_ACTION_PATH/push.sh"

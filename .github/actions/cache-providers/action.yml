@@ -1,0 +1,33 @@
+name: Cache providers
+description: >
+  Caches downloaded OpenTofu provider plugins (public binaries only). State, plan files and secrets are never cached.
+  The cache is saved automatically by the post step of actions/cache when the job ends.
+
+inputs:
+  working_directory:
+    description: Directory containing the OpenTofu configuration and .terraform.lock.hcl.
+    default: .
+
+outputs:
+  cache_hit:
+    description: "true when the provider cache was restored from an exact key match."
+    value: ${{ steps.cache.outputs.cache-hit }}
+
+runs:
+  using: composite
+  steps:
+    - name: Prepare plugin cache directory
+      shell: bash
+      env:
+        CACHE_DIR: ${{ runner.temp }}/tofu-plugin-cache
+      run: |
+        mkdir -p "$CACHE_DIR"
+        echo "TF_PLUGIN_CACHE_DIR=$CACHE_DIR" >> "$GITHUB_ENV"
+
+    - id: cache
+      uses: actions/cache@v4
+      with:
+        path: ${{ runner.temp }}/tofu-plugin-cache
+        key: tofu-providers-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles(format('{0}/.terraform.lock.hcl', inputs.working_directory)) }}
+        restore-keys: |
+          tofu-providers-${{ runner.os }}-${{ runner.arch }}-

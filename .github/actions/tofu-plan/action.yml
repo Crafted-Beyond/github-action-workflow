@@ -1,0 +1,96 @@
+name: OpenTofu plan
+description: Runs tofu init, validate and plan, then writes a collapsible summary to the job summary and a Markdown file.
+
+inputs:
+  working_directory:
+    description: Directory containing the OpenTofu configuration.
+    default: .
+  var_file:
+    description: Optional -var-file path, relative to working_directory.
+    default: ""
+  title:
+    description: Heading used in the summary. Defaults to the working directory.
+    default: ""
+
+outputs:
+  has_changes:
+    description: "true when the plan contains changes."
+    value: ${{ steps.plan.outputs.has_changes }}
+  exitcode:
+    description: tofu plan exit code (0 = no changes, 2 = changes, 1 = error).
+    value: ${{ steps.plan.outputs.exitcode }}
+  summary_file:
+    description: Path of the rendered Markdown summary.
+    value: ${{ steps.plan.outputs.summary_file }}
+  add:
+    description: Resources to add (replacements included).
+    value: ${{ steps.plan.outputs.add }}
+  change:
+    description: Resources to change in place.
+    value: ${{ steps.plan.outputs.change }}
+  destroy:
+    description: Resources to destroy (replacements included).
+    value: ${{ steps.plan.outputs.destroy }}
+
+runs:
+  using: composite
+  steps:
+    - id: plan
+      shell: bash
+      working-directory: ${{ inputs.working_directory }}
+      env:
+        VAR_FILE: ${{ inputs.var_file }}
+        TITLE: ${{ inputs.title || inputs.working_directory }}
+      run: |
+        set +e
+        log="$RUNNER_TEMP/tofu-plan.log"
+        json="$RUNNER_TEMP/tofu-plan.json"
+        txt="$RUNNER_TEMP/tofu-plan.txt"
+        md="$RUNNER_TEMP/tofu-plan.md"
+        : > "$log"
+
+        run() {
+          echo "::group::$*"
+          "$@" 2>&1 | tee -a "$log"
+          local code=${PIPESTATUS[0]}
+          echo "::endgroup::"
+          return "$code"
+        }
+
+        rc=0
+        run tofu init -input=false -no-color || rc=$?
+        if [ "$rc" -eq 0 ]; then run tofu validate -no-color || rc=$?; fi
+        if [ "$rc" -eq 0 ]; then
+          args=(-input=false -no-color -detailed-exitcode -out=tfplan)
+          if [ -n "$VAR_FILE" ]; then args+=("-var-file=$VAR_FILE"); fi
+          run tofu plan "${args[@]}" || rc=$?
+        fi
+
+        status=failed
+        has_changes=false
+        counts=""
+        if [ "$rc" -eq 0 ] || [ "$rc" -eq 2 ]; then
+          if tofu show -json tfplan > "$json" && tofu show -no-color tfplan > "$txt"; then
+            status=ok
+            if [ "$rc" -eq 2 ]; then has_changes=true; fi
+          else
+            rc=1
+          fi
+        fi
+
+        if [ "$status" = ok ]; then
+          counts=$(bash "$GITHUB_ACTION_PATH/summary.sh" "$json" "$txt" "$md" "$TITLE" ok)
+        else
+          bash "$GITHUB_ACTION_PATH/summary.sh" - "$log" "$md" "$TITLE" failed
+        fi
+        rm -f "$json"
+
+        {
+          echo "has_changes=$has_changes"
+          echo "exitcode=$rc"
+          echo "summary_file=$md"
+          if [ -n "$counts" ]; then echo "$counts"; fi
+        } >> "$GITHUB_OUTPUT"
+        cat "$md" >> "$GITHUB_STEP_SUMMARY"
+
+        if [ "$status" != ok ]; then exit 1; fi

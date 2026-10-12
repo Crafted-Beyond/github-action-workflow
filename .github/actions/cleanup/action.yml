@@ -1,0 +1,36 @@
+name: Cleanup
+description: >
+  Removes state, plan files, credentials and secret-bearing environment files from the runner so nothing sensitive is
+  left on a persistent (on-prem) runner. Run with if: always(). The provider plugin cache is intentionally kept,
+  because the cache post step saves it after this step.
+
+inputs:
+  working_directory:
+    description: Directory containing the OpenTofu configuration.
+    default: .
+  checkout_path:
+    description: Where the state repository was checked out by state-pull.
+    default: .tofu-state-repo
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        WORKDIR: ${{ inputs.working_directory }}
+        CHECKOUT_PATH: ${{ inputs.checkout_path }}
+      run: |
+        # Drop the token from git config first, then delete the checkout.
+        if [ -d "$CHECKOUT_PATH/.git" ]; then
+          git -C "$CHECKOUT_PATH" config --local --unset-all http.https://github.com/.extraheader || true
+          git -C "$CHECKOUT_PATH" remote set-url origin "https://github.com/removed.git" || true
+        fi
+        rm -rf "$CHECKOUT_PATH"
+
+        rm -f "$WORKDIR"/terraform.tfstate "$WORKDIR"/terraform.tfstate.backup "$WORKDIR"/tfplan "$WORKDIR"/crash.log
+        rm -rf "$WORKDIR"/.terraform
+        rm -f "$RUNNER_TEMP"/tofu-plan.* "$RUNNER_TEMP"/tofu-apply.*
+
+        # Credential leftovers a git step may have written.
+        rm -f "$HOME/.git-credentials" 2>/dev/null || true
+        git config --global --unset-all http.https://github.com/.extraheader 2>/dev/null || true

@@ -1,0 +1,60 @@
+name: OpenTofu apply
+description: Applies the saved plan (tfplan) produced by the tofu-plan action and writes an apply summary.
+
+inputs:
+  working_directory:
+    description: Directory containing the OpenTofu configuration and tfplan.
+    default: .
+  title:
+    description: Heading used in the summary. Defaults to the working directory.
+    default: ""
+
+outputs:
+  exitcode:
+    description: tofu apply exit code.
+    value: ${{ steps.apply.outputs.exitcode }}
+
+runs:
+  using: composite
+  steps:
+    - id: apply
+      shell: bash
+      working-directory: ${{ inputs.working_directory }}
+      env:
+        TITLE: ${{ inputs.title || inputs.working_directory }}
+      run: |
+        set +e
+        log="$RUNNER_TEMP/tofu-apply.log"
+        md="$RUNNER_TEMP/tofu-apply.md"
+
+        echo "::group::tofu apply"
+        tofu apply -input=false -no-color tfplan 2>&1 | tee "$log"
+        rc=${PIPESTATUS[0]}
+        echo "::endgroup::"
+
+        result=$(grep -E '^Apply complete!' "$log" | tail -n 1)
+        {
+          printf '## 🚀 OpenTofu apply: `%s`\n\n' "$TITLE"
+          if [ "$rc" -eq 0 ]; then
+            printf '> ✅ **%s**\n\n' "${result:-Apply complete.}"
+          else
+            printf '> ❌ **Apply failed.** The state recorded so far is still saved.\n\n'
+          fi
+
+          printf '<details%s>\n<summary>Apply log</summary>\n\n````text\n' "$([ "$rc" -ne 0 ] && echo ' open')"
+          tail -n 300 "$log"
+          printf '\n````\n\n</details>\n\n'
+
+          if [ "$rc" -eq 0 ]; then
+            outputs=$(tofu output -no-color 2>&1 | head -c 20000)
+            if [ -n "$outputs" ]; then
+              printf '<details>\n<summary>📤 Outputs</summary>\n\n````text\n%s\n````\n\n</details>\n\n' "$outputs"
+            fi
+          fi
+          printf '<sub>Commit `%s` · [workflow run](%s/%s/actions/runs/%s)</sub>\n' \
+            "${GITHUB_SHA:0:7}" "${GITHUB_SERVER_URL:-https://github.com}" "${GITHUB_REPOSITORY:-}" "${GITHUB_RUN_ID:-}"
+        } > "$md"
+        cat "$md" >> "$GITHUB_STEP_SUMMARY"
+
+        echo "exitcode=$rc" >> "$GITHUB_OUTPUT"
+        exit "$rc"
