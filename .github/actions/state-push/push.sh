@@ -20,12 +20,19 @@ dest="$CHECKOUT_PATH/$STATE_PATH"
 mkdir -p "$dest"
 cp "$src" "$dest/terraform.tfstate"
 
+# OpenTofu writes the previous state to terraform.tfstate.backup on every apply that changes state.
+files=("$STATE_PATH/terraform.tfstate")
+if [ -f "$src.backup" ]; then
+  cp "$src.backup" "$dest/terraform.tfstate.backup"
+  files+=("$STATE_PATH/terraform.tfstate.backup")
+fi
+
 cd "$CHECKOUT_PATH"
 git config user.name "$GIT_USER_NAME"
 git config user.email "$GIT_USER_EMAIL"
 
 # -f because state repositories often ignore *.tfstate*.
-git add -f -- "$STATE_PATH/terraform.tfstate"
+git add -f -- "${files[@]}"
 if git diff --cached --quiet; then
   echo "State unchanged, nothing to commit."
   exit 0

@@ -19,7 +19,7 @@ one directory per stack, instead of in cloud storage.
 | `state-pull` | Checks out the state repo and copies `<state_path>/terraform.tfstate` into the working directory |
 | `tofu-plan` | `init`, `validate`, `plan`, then writes the table and collapsible summary |
 | `tofu-apply` | Applies the saved plan and writes an apply summary |
-| `state-push` | Commits the new state to the state repo (retries on a concurrent push) |
+| `state-push` | Commits `terraform.tfstate` and `terraform.tfstate.backup` (the previous state) to the state repo, retrying on a concurrent push. Git history keeps every earlier version too |
 | `pr-comment` | Creates or updates one plan comment per stack on the pull request |
 | `cache-providers` | Caches provider plugins only (key from `.terraform.lock.hcl`). Saved by the automatic `Post Cache` step |
 | `cleanup` | Always runs last: strips the token from git config, deletes the state checkout, state, plan files and `.terraform` |
@@ -88,6 +88,47 @@ jobs:
 | `apply` | `true` | Set `false` for plan-only |
 | `apply_branch` | `main` | Only this branch may apply |
 | `environment` | none | GitHub environment for the apply job |
+
+### Multiple environments (dev, test, preprod, prod)
+
+The `environment` input gives each environment its own state folder in the state repo:
+
+```
+github-terraform-backend (branch: main)
+└── my-stack/
+    ├── dev/      terraform.tfstate + terraform.tfstate.backup
+    ├── test/
+    ├── preprod/
+    └── prod/
+```
+
+It also selects the GitHub environment for the apply job, so `prod` can require manual approval. Call the workflow once per environment:
+
+```yaml
+jobs:
+  dev:
+    uses: Crafted-Beyond/github-action-workflow/.github/workflows/tofu.yml@main
+    with: { state_repository: Crafted-Beyond/github-terraform-backend, environment: dev, var_file: envs/dev.tfvars }
+    secrets: { state_repo_token: "${{ secrets.GH_TOKEN }}", tofu_env: "TF_VAR_github_token=${{ secrets.GH_TOKEN }}" }
+  prod:
+    needs: dev   # promote in order; add test and preprod the same way
+    uses: Crafted-Beyond/github-action-workflow/.github/workflows/tofu.yml@main
+    with: { state_repository: Crafted-Beyond/github-terraform-backend, environment: prod, var_file: envs/prod.tfvars }
+    secrets: { state_repo_token: "${{ secrets.GH_TOKEN }}", tofu_env: "TF_VAR_github_token=${{ secrets.GH_TOKEN }}" }
+```
+
+| Environment | Branch | Plan | Apply |
+| --- | --- | --- | --- |
+| `dev` | any, including feature branches | yes | yes |
+| `test` | `main` only | yes | yes, no approval |
+| `preprod`, `prod` | `main` only | yes, no approval | waits for manual approval |
+
+Other branches are skipped for `test`, `preprod` and `prod`. Pull requests that target `main` still get a plan-only
+preview. `unrestricted_environments` (default `dev`) controls which environments may run from any branch.
+
+Approval is configured on the GitHub side: under Settings, Environments in the calling repo, create `dev`, `test`,
+`preprod` and `prod`, and add **Required reviewers** to `preprod` and `prod` only. Also set their deployment branches to
+`main` (`dev`: all branches) as a second guard. The approval gate applies only to the apply job, so plans never wait. Without `environment`, state goes to `<state_path>/` as before.
 
 ### Requirements
 

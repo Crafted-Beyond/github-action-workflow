@@ -43,11 +43,15 @@ on:
         type: boolean
         default: true
       apply_branch:
-        description: Only this branch is allowed to apply.
+        description: Branch that environments outside unrestricted_environments must run from.
         type: string
         default: main
+      unrestricted_environments:
+        description: Comma separated environments allowed to plan and apply from any branch, for example a feature branch.
+        type: string
+        default: dev
       environment:
-        description: Optional GitHub environment for the apply job, to require manual approval.
+        description: Environment name, for example dev, test, preprod or prod. Selects a separate state folder (<state_path>/<environment>) and the GitHub environment for the apply job (manual approval).
         type: string
         default: ""
     secrets:
@@ -59,20 +63,22 @@ on:
         required: false
 
 concurrency:
-  group: tofu-${{ inputs.state_repository }}-${{ inputs.state_path || github.event.repository.name }}
+  group: tofu-${{ inputs.state_repository }}-${{ inputs.state_path || github.event.repository.name }}-${{ inputs.environment }}
   cancel-in-progress: false
 
 jobs:
   plan:
     name: Plan
     # Pull requests from forks never receive secrets, so they are skipped.
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    # Environments in unrestricted_environments (dev) run from any branch. Every other environment runs only from
+    # apply_branch (main), or on pull requests that target it (plan only).
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (contains(format(',{0},', inputs.unrestricted_environments), format(',{0},', inputs.environment)) || github.ref == format('refs/heads/{0}', inputs.apply_branch) || (github.event_name == 'pull_request' && github.base_ref == inputs.apply_branch)) }}
     runs-on: ${{ fromJSON(inputs.runs_on) }}
     permissions:
       contents: read
       pull-requests: write
     env:
-      STATE_PATH: ${{ inputs.state_path || github.event.repository.name }}
+      STATE_PATH: ${{ format('{0}{1}', inputs.state_path || github.event.repository.name, inputs.environment != '' && format('/{0}', inputs.environment) || '') }}
     outputs:
       has_changes: ${{ steps.plan.outputs.has_changes }}
     steps:
@@ -125,13 +131,13 @@ jobs:
   apply:
     name: Apply
     needs: plan
-    if: ${{ inputs.apply && github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', inputs.apply_branch) && needs.plan.outputs.has_changes == 'true' }}
+    if: ${{ inputs.apply && github.event_name != 'pull_request' && (contains(format(',{0},', inputs.unrestricted_environments), format(',{0},', inputs.environment)) || github.ref == format('refs/heads/{0}', inputs.apply_branch)) && needs.plan.outputs.has_changes == 'true' }}
     runs-on: ${{ fromJSON(inputs.runs_on) }}
     environment: ${{ inputs.environment }}
     permissions:
       contents: read
     env:
-      STATE_PATH: ${{ inputs.state_path || github.event.repository.name }}
+      STATE_PATH: ${{ format('{0}{1}', inputs.state_path || github.event.repository.name, inputs.environment != '' && format('/{0}', inputs.environment) || '') }}
     steps:
       - uses: actions/checkout@v4
         with:
