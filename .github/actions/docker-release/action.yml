@@ -1,0 +1,43 @@
+name: Docker release control
+description: Validate release labels, serialize publications, version Git tags and delete PR image tags.
+inputs:
+  operation:
+    required: true
+    description: prepare, preflight, finalize or unlock.
+outputs:
+  publish:
+    value: ${{ steps.control.outputs.publish }}
+    description: False when a recorded release needs cleanup only.
+  digest:
+    value: ${{ steps.control.outputs.digest }}
+    description: Recorded release digest on a cleanup retry.
+  build:
+    value: ${{ steps.control.outputs.build }}
+    description: Whether this event should publish an image.
+  mode:
+    value: ${{ steps.control.outputs.mode }}
+    description: pr or release.
+  sha:
+    value: ${{ steps.control.outputs.sha }}
+    description: Immutable source commit.
+  tag:
+    value: ${{ steps.control.outputs.tag }}
+    description: Container tag.
+  image:
+    value: ${{ steps.control.outputs.image }}
+    description: Fully qualified tagged image.
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-go@v5
+      with:
+        go-version: "1.26.x"
+        cache: false
+    - id: control
+      shell: bash
+      env:
+        DOCKER_CONTROL_PATH: ${{ github.action_path }}
+        DOCKER_CONTROL_OPERATION: ${{ inputs.operation }}
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        go run "$DOCKER_CONTROL_PATH/main.go" "$DOCKER_CONTROL_OPERATION"

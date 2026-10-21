@@ -1,0 +1,21 @@
+name: Docker image
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, reopened, synchronize, labeled, unlabeled, closed]
+
+permissions:
+  contents: write
+  pull-requests: read
+
+jobs:
+  image:
+    uses: Crafted-Beyond/github-action-workflow/.github/workflows/docker-image.yml@main
+    with:
+      image: craftedbeyond/REPLACE_WITH_IMAGE_NAME
+      # registry defaults to docker.io
+      platforms: linux/arm64
+    secrets:
+      registry_username: ${{ secrets.DOCKERHUB_USERNAME }}
+      registry_password: ${{ secrets.DOCKERHUB_TOKEN }}

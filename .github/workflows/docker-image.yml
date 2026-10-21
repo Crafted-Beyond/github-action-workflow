@@ -1,0 +1,169 @@
+name: Docker image
+
+on:
+  workflow_call:
+    inputs:
+      image:
+        description: Registry repository without hostname, for example craftedbeyond/wireguard-api.
+        type: string
+        required: true
+      registry:
+        type: string
+        default: docker.io
+      registry_adapter:
+        description: dockerhub, or custom with a trusted registry_cleanup_script.
+        type: string
+        default: dockerhub
+      registry_cleanup_script:
+        description: Custom Go tag-list/delete adapter in the caller's release branch.
+        type: string
+        default: ""
+      release_branch:
+        type: string
+        default: main
+      context:
+        type: string
+        default: .
+      dockerfile:
+        type: string
+        default: Dockerfile
+      platforms:
+        description: Docker target platforms; linux/arm64 matches Raspberry Pi aarch64.
+        type: string
+        default: linux/arm64
+      runs_on:
+        description: Runner labels as JSON.
+        type: string
+        default: '"ubuntu-latest"'
+    secrets:
+      registry_username:
+        required: true
+      registry_password:
+        description: Docker Hub access token, or the selected registry credential.
+        required: true
+
+permissions: {}
+
+jobs:
+  image:
+    # Do not use pull_request_target to build untrusted PR Dockerfiles.
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.base.ref == inputs.release_branch
+    runs-on: ${{ fromJSON(inputs.runs_on) }}
+    timeout-minutes: 90
+    permissions:
+      contents: write
+      pull-requests: read
+    env:
+      IMAGE_REPOSITORY: ${{ inputs.image }}
+      IMAGE_REGISTRY: ${{ inputs.registry }}
+      REGISTRY_ADAPTER: ${{ inputs.registry_adapter }}
+      REGISTRY_CLEANUP_SCRIPT: ${{ inputs.registry_cleanup_script }}
+      RELEASE_BRANCH: ${{ inputs.release_branch }}
+      REGISTRY_USERNAME: ${{ secrets.registry_username }}
+      REGISTRY_PASSWORD: ${{ secrets.registry_password }}
+    steps:
+      - name: Validate event, labels and acquire publication lock
+        id: prepare
+        uses: Crafted-Beyond/github-action-workflow/.github/actions/docker-release@main
+        with:
+          operation: prepare
+
+      - name: Checkout immutable application commit
+        if: steps.prepare.outputs.build == 'true' && steps.prepare.outputs.publish == 'true'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.prepare.outputs.sha }}
+          persist-credentials: false
+          path: source
+
+      - name: Checkout trusted registry adapter
+        if: steps.prepare.outputs.build == 'true' && inputs.registry_adapter == 'custom'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_branch }}
+          persist-credentials: false
+          path: registry-control
+
+      - name: Check registry cleanup access before publishing
+        if: steps.prepare.outputs.build == 'true'
+        uses: Crafted-Beyond/github-action-workflow/.github/actions/docker-release@main
+        with:
+          operation: preflight
+
+      - name: Set up QEMU
+        if: steps.prepare.outputs.publish == 'true'
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        if: steps.prepare.outputs.publish == 'true'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Select BuildKit cache scopes
+        if: steps.prepare.outputs.publish == 'true'
+        id: cache
+        shell: bash
+        env:
+          CACHE_CONTEXT: ${{ inputs.context }}
+          CACHE_DOCKERFILE: ${{ inputs.dockerfile }}
+          CACHE_PLATFORMS: ${{ inputs.platforms }}
+          CACHE_MODE: ${{ steps.prepare.outputs.mode }}
+          CACHE_PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          key="$(printf '%s\0' "$IMAGE_REGISTRY" "$IMAGE_REPOSITORY" "$CACHE_CONTEXT" "$CACHE_DOCKERFILE" "$CACHE_PLATFORMS" | sha256sum | cut -d' ' -f1)"
+          release_scope="docker-${key}-release"
+          if [[ "$CACHE_MODE" == "release" ]]; then
+            write_scope="$release_scope"
+          else
+            write_scope="docker-${key}-pr-${CACHE_PR}"
+          fi
+          printf 'release_scope=%s\nwrite_scope=%s\n' "$release_scope" "$write_scope" >> "$GITHUB_OUTPUT"
+
+      - name: Login to registry
+        if: steps.prepare.outputs.publish == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ inputs.registry }}
+          username: ${{ secrets.registry_username }}
+          password: ${{ secrets.registry_password }}
+
+      - name: Build and publish immutable source
+        if: steps.prepare.outputs.publish == 'true'
+        id: publish
+        uses: docker/build-push-action@v6
+        with:
+          context: source/${{ inputs.context }}
+          file: source/${{ inputs.dockerfile }}
+          platforms: ${{ inputs.platforms }}
+          push: true
+          tags: ${{ steps.prepare.outputs.image }}
+          cache-from: |
+            type=gha,version=2,scope=${{ steps.cache.outputs.write_scope }}
+            type=gha,version=2,scope=${{ steps.cache.outputs.release_scope }}
+          cache-to: type=gha,version=2,scope=${{ steps.cache.outputs.write_scope }},mode=max
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ steps.prepare.outputs.sha }}
+
+      - name: Record release tag then clean up previous PR images
+        if: steps.prepare.outputs.build == 'true' && (steps.publish.outcome == 'success' || steps.prepare.outputs.publish == 'false')
+        id: finalize
+        uses: Crafted-Beyond/github-action-workflow/.github/actions/docker-release@main
+        env:
+          BUILD_SHA: ${{ steps.prepare.outputs.sha }}
+          BUILD_TAG: ${{ steps.prepare.outputs.tag }}
+          BUILD_MODE: ${{ steps.prepare.outputs.mode }}
+          BUILD_DIGEST: ${{ steps.publish.outputs.digest || steps.prepare.outputs.digest }}
+        with:
+          operation: finalize
+
+      - name: Release publication lock
+        if: always()
+        uses: Crafted-Beyond/github-action-workflow/.github/actions/docker-release@main
+        env:
+          PUBLICATION_COMPLETE: ${{ steps.finalize.outcome == 'success' }}
+        with:
+          operation: unlock
