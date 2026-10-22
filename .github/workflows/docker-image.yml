@@ -99,6 +99,13 @@ jobs:
       REGISTRY_PASSWORD: ${{ secrets.registry_password }}
       ALLOW_PREVIEW: ${{ inputs.allow_preview }}
     steps:
+      - name: Isolate Docker credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          install -d -m 700 "$RUNNER_TEMP/combine-docker"
+          printf 'DOCKER_CONFIG=%s\n' "$RUNNER_TEMP/combine-docker" >> "$GITHUB_ENV"
+
       - name: Validate event, labels and acquire publication lock
         id: prepare
         uses: Crafted-Beyond/github-action-workflow/.github/actions/docker-release@main
@@ -135,8 +142,11 @@ jobs:
         uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
+        id: buildx
         if: steps.prepare.outputs.publish == 'true'
         uses: docker/setup-buildx-action@v3
+        with:
+          cleanup: false
 
       - name: Select BuildKit cache scopes
         if: steps.prepare.outputs.publish == 'true'
@@ -160,12 +170,14 @@ jobs:
           printf 'release_scope=%s\nwrite_scope=%s\n' "$release_scope" "$write_scope" >> "$GITHUB_OUTPUT"
 
       - name: Login to registry
+        id: login
         if: steps.prepare.outputs.publish == 'true'
         uses: docker/login-action@v3
         with:
           registry: ${{ inputs.registry }}
           username: ${{ secrets.registry_username }}
           password: ${{ secrets.registry_password }}
+          logout: false
 
       - name: Build and publish immutable source
         if: steps.prepare.outputs.publish == 'true'
@@ -213,3 +225,21 @@ jobs:
           REPORT_BODY: Image publication failed. Inspect this run before retrying; no environment deployment was requested by this job.
         with:
           operation: report
+
+      - name: Remove this job's Buildx builder
+        if: ${{ always() && steps.buildx.outputs.name != '' }}
+        shell: bash
+        env:
+          BUILDER_NAME: ${{ steps.buildx.outputs.name }}
+        run: docker buildx rm "$BUILDER_NAME"
+
+      - name: Logout from registry
+        if: ${{ always() && steps.login.outcome == 'success' }}
+        shell: bash
+        run: docker logout "$IMAGE_REGISTRY"
+
+      - name: Remove build checkouts and credentials
+        if: always()
+        uses: Crafted-Beyond/github-action-workflow/.github/actions/docker-release@main
+        with:
+          operation: build-cleanup

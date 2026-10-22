@@ -31,10 +31,15 @@ on:
         type: string
         default: '"ubuntu-latest"'
       deploy_runs_on:
-        description: Trusted runner with kubectl, Git and access to the on-prem K3s API.
+        description: Runner as JSON; GitHub-hosted Ubuntu by default.
         type: string
-        default: '["self-hosted","linux"]'
+        default: '"ubuntu-latest"'
+      kubectl_version:
+        description: kubectl version within one minor version of the K3s API server.
+        type: string
+        default: v1.34.0
       infrastructure_repository:
+        description: Trusted repository containing the Terraform root; may be the application repository.
         type: string
         default: Crafted-Beyond/crb-craftedbeyond-k3s-terraform
       infrastructure_ref:
@@ -42,7 +47,11 @@ on:
         type: string
         default: main
       infrastructure_directory:
-        description: Application Terraform root in the trusted central repository; defaults to applications/<calling-repository-name>.
+        description: Terraform root in the trusted repository, for example infra; defaults to applications/<calling-repository-name>.
+        type: string
+        default: ""
+      deployment_var_file:
+        description: Optional relative .tfvars or .tfvars.json path in the Terraform root; environment comes from this file and must match the selected GitHub environment.
         type: string
         default: ""
       state_repository:
@@ -80,6 +89,9 @@ on:
       image_pull_username:
         required: false
       image_pull_password:
+        required: false
+      application_secrets:
+        description: Optional JSON object of application-specific Terraform credentials.
         required: false
 
 permissions: {}
@@ -139,13 +151,20 @@ jobs:
       DEPLOY_ENVIRONMENT: ${{ inputs.environment }}
       DEPLOY_TAG: ${{ inputs.tag }}
       INFRASTRUCTURE_DIRECTORY: ${{ inputs.infrastructure_directory }}
+      DEPLOYMENT_VAR_FILE: ${{ inputs.deployment_var_file }}
       STATE_REPOSITORY: ${{ inputs.state_repository }}
       TF_VAR_registry_username: ${{ secrets.image_pull_username || secrets.registry_username }}
       TF_VAR_registry_password: ${{ secrets.image_pull_password || secrets.registry_password }}
       TF_VAR_github_token: ${{ secrets.GH_TOKEN }}
       TF_VAR_chart_repository_url: ${{ secrets.chart_repository_url }}
+      TF_VAR_application_secrets: ${{ secrets.application_secrets || '{}' }}
       TF_IN_AUTOMATION: "true"
     steps:
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: ${{ inputs.kubectl_version }}
+
       - name: Checkout trusted custom registry adapter
         if: inputs.registry_adapter == 'custom'
         uses: actions/checkout@v4
@@ -156,12 +175,6 @@ jobs:
           path: registry-control
           persist-credentials: false
 
-      - name: Resolve immutable image and deployment identity
-        id: deployment
-        uses: Crafted-Beyond/github-action-workflow/.github/actions/docker-release@main
-        with:
-          operation: deployment-prepare
-
       - name: Checkout trusted deployment infrastructure
         uses: actions/checkout@v4
         with:
@@ -171,6 +184,12 @@ jobs:
           path: infrastructure
           persist-credentials: false
 
+      - name: Resolve immutable image and deployment identity
+        id: deployment
+        uses: Crafted-Beyond/github-action-workflow/.github/actions/docker-release@main
+        with:
+          operation: deployment-prepare
+
       - name: Prepare credentials and runtime metadata
         shell: bash
         env:
@@ -178,7 +197,7 @@ jobs:
           WORKDIR: ${{ steps.deployment.outputs.working_directory }}
         run: |
           set -euo pipefail
-          command -v kubectl >/dev/null || { echo "::error::Install kubectl on the deployment runner."; exit 1; }
+          kubectl version --client
           test -n "$CLUSTER_CONFIG" || { echo "::error::The kubeconfig secret is required for deployment."; exit 1; }
           umask 077
           export KUBECONFIG="$RUNNER_TEMP/combine-kubeconfig"
@@ -186,7 +205,10 @@ jobs:
           printf '%s\n' "$CLUSTER_CONFIG" > "$KUBECONFIG"
           test -d "$WORKDIR" || { echo "::error::Create the application's Terraform root in the central infrastructure repository."; exit 1; }
           cp "$RUNNER_TEMP/combine.auto.tfvars.json" "$WORKDIR/combine.auto.tfvars.json"
-          kubectl get crd applications.argoproj.io appprojects.argoproj.io >/dev/null
+
+      - name: Verify Kubernetes API connectivity
+        shell: bash
+        run: kubectl --request-timeout=30s get crd applications.argoproj.io appprojects.argoproj.io >/dev/null
 
       - name: Install OpenTofu
         uses: Crafted-Beyond/github-action-workflow/.github/actions/setup-tofu@main
@@ -219,13 +241,25 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          export GIT_CONFIG_GLOBAL="$RUNNER_TEMP/combine-gitconfig"
+          umask 077
+          git config --file "$GIT_CONFIG_GLOBAL" "http.${GITHUB_SERVER_URL}/.extraheader" \
+            "AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w 0)"
+          printf 'GIT_CONFIG_GLOBAL=%s\n' "$GIT_CONFIG_GLOBAL" >> "$GITHUB_ENV"
+          export GIT_TERMINAL_PROMPT=0
           tofu init -input=false -no-color
           tofu validate -no-color
 
       - name: Plan the exact image deployment
         working-directory: ${{ steps.deployment.outputs.working_directory }}
         shell: bash
-        run: tofu plan -input=false -no-color -out=tfplan
+        run: |
+          set -euo pipefail
+          args=()
+          if [[ -n "$DEPLOYMENT_VAR_FILE" ]]; then
+            args+=("-var-file=$DEPLOYMENT_VAR_FILE")
+          fi
+          tofu plan -input=false -no-color -out=tfplan "${args[@]}"
 
       - name: Apply deployment prerequisites and Argo CD Application
         id: apply
@@ -288,7 +322,7 @@ jobs:
         with:
           operation: report
 
-      - name: Clean secret-bearing runner files
+      - name: Clean deployment files
         if: always()
         uses: Crafted-Beyond/github-action-workflow/.github/actions/docker-release@main
         env:

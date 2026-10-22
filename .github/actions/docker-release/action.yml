@@ -3,7 +3,7 @@ description: Validate release labels, serialize publications, version Git tags a
 inputs:
   operation:
     required: true
-    description: prepare, preflight, finalize, unlock, deployment-prepare, deployment-lock, deployment-outputs, deployment-complete, deployment-cleanup or report.
+    description: prepare, preflight, finalize, unlock, build-cleanup, deployment-prepare, deployment-lock, deployment-outputs, deployment-complete, deployment-cleanup or report.
 outputs:
   working_directory:
     value: ${{ steps.control.outputs.working_directory }}
@@ -73,4 +73,4 @@ runs:
         DOCKER_CONTROL_OPERATION: ${{ inputs.operation }}
         GH_TOKEN: ${{ env.GH_TOKEN || github.token }}
       run: |
-        go run "$DOCKER_CONTROL_PATH/main.go" "$DOCKER_CONTROL_OPERATION"
+        go -C "$DOCKER_CONTROL_PATH" run . "$DOCKER_CONTROL_OPERATION"

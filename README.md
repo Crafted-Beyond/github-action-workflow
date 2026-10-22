@@ -2,6 +2,85 @@
 
 GitHub Actions workflow repository.
 
+## Installing shared application secrets
+
+Secret management lives in the same `github-terraform-resource/infra/main.tf`
+root as repository creation, teams and OAuth metadata. Its secret module uses
+`depends_on = [module.custom]` to wait for repository creation. There is no
+separate replication workflow, Terraform root or secret state.
+
+Source values are **repository Actions secrets** in
+`Crafted-Beyond/github-terraform-resource` once:
+
+| Secret | Value |
+|---|---|
+| `GH_TOKEN` | Token authorized to manage destination repository secrets and access the private state backend |
+| `DOCKERHUB_TOKEN` | Shared Docker Hub registry token |
+| `KUBECONFIG` | Complete self-contained kubeconfig with runner-reachable server and embedded credentials |
+
+`DOCKERHUB_USERNAME = "john24rel"` and
+`CHART_REPOSITORY_URL = "https://github.com/Crafted-Beyond/crb-craftedbeyond-k3s-chart.git"`
+are plain values defined in the infrastructure module call. Terraform creates
+them as repository Actions **variables** for `secret = true` destinations;
+callers use `vars.DOCKERHUB_USERNAME` and `vars.CHART_REPOSITORY_URL`.
+They do not need source secrets. Existing manually created secrets with these
+names are not deleted, but updated callers no longer read them.
+
+Replace any client credential shared in chat before uploading it. Never commit
+secret values. `GH_TOKEN` also needs the application workflow permissions:
+application tag/PR write, collaborator-permission read, infrastructure/chart read,
+backend repository read/write, and Secrets write for every destination.
+Complete any organization SSO approval. Keep an old token valid until its
+replacement has propagated.
+
+In `github-terraform-resource/infra/main.tf`, add `secret = true` inside each
+desired `sub_repos` entry. It defaults to false; `wireguard-api` is enabled.
+Do not enable it on the source `github-terraform-resource` repository.
+With `secret = true` and no explicit list, only `GH_TOKEN` is copied.
+Use `dedicated_secrets = ["GH_TOKEN", "DOCKERHUB_TOKEN", "KUBECONFIG", "APPLICATION_SECRETS"]`
+to copy exactly those names. `secret = false` disables copying.
+The infrastructure caller explicitly passes source values as a JSON
+`TF_VAR_repository_secret_values` assignment through the existing `tofu_env`
+secret. No new reusable workflow secret input is needed.
+Add further names to that mapping using `toJSON(secrets.YOUR_NAME)`;
+GitHub does not expose stored secret plaintext through its API.
+
+Run **Manage GitHub infrastructure** in `github-terraform-resource` on `main`
+with action **apply**. That same plan/apply creates opted-in secrets and updates
+changed source values. Plans and pull requests never write secrets.
+There is no schedule and changing a secret alone does not start an apply.
+Local CLI use requires securely providing `TF_VAR_github_token` and
+`TF_VAR_repository_secret_values` to the same infrastructure root/state.
+
+Publish both repositories' configuration changes to `main` before using this
+integration. The existing apply uses the `prod` GitHub environment, so approval
+may be required. Review environment overrides of repository secrets.
+
+**State contains plaintext secret values**, even though Terraform marks them
+sensitive in CLI output. The existing unified state is saved in the private
+`Crafted-Beyond/github-terraform-backend` repository at
+`github-terraform-resource/prod/terraform.tfstate`. Restrict backend access: Git history
+retains previous values. Plans/state are not uploaded as workflow artifacts.
+Partial applies are saved; if state saving fails, stop and reconcile state
+before rerunning because the hosted runner is ephemeral.
+
+Only the shared and explicitly selected dedicated secrets are managed;
+unrelated secrets remain untouched.
+Destination values with those names are overwritten. Secret resources have
+`prevent_destroy`: opting out, renaming or removing a destination that already
+received secrets will fail planning until ownership/removal is explicitly
+reviewed. This avoids automatically deleting deployed credentials.
+Only opt in trusted repositories; the same token and cluster identity are copied.
+Destination environment secrets with matching names override repository secrets.
+Successful replication does not prove deployment connectivity or trigger builds.
+
+**Application-specific secrets require explicit selection.** For example,
+`wireguard-api` requires `APPLICATION_SECRETS` containing PostgreSQL and admin
+passwords. Populate that source value and opt it in with `dedicated_secrets`,
+or manage it separately; shared secrets alone are insufficient.
+Registry repositories, runner connectivity and published trusted workflows,
+Terraform modules and charts must also be configured.
+
 ## Docker image builds and semantic releases
 
 Reusable workflow: [docker-image.yml](./.github/workflows/docker-image.yml).
@@ -218,7 +297,7 @@ unreferenced layer bytes; that is the registry's responsibility.
 
 No test suite is included for this workflow, as requested. Any future tests
 should be written in Go. The release controller is implemented entirely in
-[Go](./.github/actions/docker-release/main.go), using only the standard library.
+[Go](./.github/actions/docker-release/main.go), using the standard library for release control and HashiCorp's HCL parser for Terraform variable files.
 The composite action installs Go 1.26 and invokes it for each operation; the
 workflow wrapper remains GitHub Actions YAML. No custom JavaScript is required.
 
@@ -246,6 +325,14 @@ Docker workflow above and one trusted `applications/<repository-name>/` root in
 `Crafted-Beyond/crb-craftedbeyond-k3s-terraform`. Publish both repositories'
 changes before enabling the caller. It does not install Argo CD, Gateway API,
 Istio, DNS infrastructure or cluster controllers.
+
+Application-owned Terraform roots are also supported: set
+`infrastructure_repository` to the application repository,
+`infrastructure_ref: main` and `infrastructure_directory: infra`. That root calls
+the shared combine module through its Git source. `GH_TOKEN` authenticates module
+downloads through a temporary Git configuration removed during cleanup. Preview
+runs still use protected `main`, never the PR's Terraform code. WireGuard API uses
+this application-owned layout.
 
 ### Three separate operations
 
@@ -323,14 +410,19 @@ Retained previews keep their current image even after merge or label removal.
 | --- | --- |
 | `image` | Existing registry namespace/repository |
 | `state_repository` / `state_ref` | Existing **private** Git repository/branch for state |
-| `deploy_runs_on` | Trusted runner labels; default `["self-hosted","linux"]` |
+| `deploy_runs_on` | Runner as JSON; default `"ubuntu-latest"` |
+| `kubectl_version` | Installed kubectl version; default `v1.34.0`, must be within one minor of K3s |
 | `infrastructure_repository` / `infrastructure_ref` | Trusted deployment code; default CraftedBeyond Terraform repository at `main` |
 | `infrastructure_directory` | Central Terraform application root; default `applications/<calling-repository-name>` |
+| `deployment_var_file` | Optional relative HCL `.tfvars` or JSON `.tfvars.json` path in that root, for example `environments/prod.tfvars`; supplies the actual environment and Terraform application settings |
 | `environment` / `tag` | Explicit workflow_dispatch target and optional version |
 | `tofu_version` | OpenTofu version; default `latest` |
 
 Docker inputs (`registry`, adapter, context, Dockerfile, platforms) retain their
 existing behavior. Use `build_runs_on` for build-runner labels.
+When `deployment_var_file` is set, it is read from the trusted checkout before
+loading state and passed to `tofu plan`. Its `environment` must match the manual
+GitHub environment; preview state still uses its isolated `pr<number>` name.
 
 | Secret | Purpose |
 | --- | --- |
@@ -339,6 +431,7 @@ existing behavior. Use `build_runs_on` for build-runner labels.
 | `chart_repository_url` | HTTPS chart Git URL on the same GitHub server, required for deployment; no embedded credentials |
 | `GH_TOKEN` | GitHub API, application/infrastructure checkouts, private state read/write and chart repository read access |
 | `image_pull_username`, `image_pull_password` | Optional paired read-only registry credentials for K3s; otherwise publisher credentials are used |
+| `application_secrets` | Optional JSON object exported as `TF_VAR_application_secrets`; the central application root defines its required credential fields |
 
 The example maps uppercase application secrets to these reusable secret names.
 Use the existing repository/organization `GH_TOKEN` secret for all GitHub access;
@@ -353,9 +446,24 @@ the GitHub environments (`preview`, `dev`, etc.). Protect actual environments
 with reviewers as appropriate. Build credentials are repository secrets; preview
 deployments select the `preview` environment. Keep runner access restricted to
 trusted repositories, use ephemeral builders, and never run PR code on the
-deployment runner. The trusted deployment runner needs Git, kubectl, and network
-access to GitHub, the registry and K3s. OpenTofu is installed by the existing setup
-action.
+deployment runner. GitHub-hosted Ubuntu supplies Git and Docker. Setup actions
+install Go, QEMU/Buildx, kubectl and OpenTofu for the jobs that need them.
+K3s must be reachable from the hosted runner through a TLS-valid kubeconfig
+endpoint or an explicitly configured private-network connection. No VPN,
+firewall opening or TLS bypass is silently configured. Cluster requests have a
+30-second preflight timeout.
+
+Deployment uses the supplied kubeconfig directly. No SSH login, Cloudflare SSH
+forward, or connection helper is used. Its server endpoint must be reachable
+from the deployment runner with valid TLS and Kubernetes authentication.
+
+Always-run cleanup removes generated deployment credentials, tfvars, plans,
+working state and checkouts once state is persisted, and removes isolated Docker
+credentials/build checkouts. Always-run steps remove this job's builder and log
+out before deleting its Docker configuration.
+Installed tools and remaining temporary files disappear with the hosted VM.
+The GitHub Actions BuildKit cache is deliberately retained. No global Docker
+prune, deletion of release images, or deletion of deployed resources is performed.
 
 State and saved plans are not encrypted and can contain registry/chart
 credentials. Keep the state repository private and restrict repository/runner

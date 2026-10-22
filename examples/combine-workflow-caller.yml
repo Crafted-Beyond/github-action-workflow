@@ -28,15 +28,15 @@ jobs:
     with:
       image: craftedbeyond/REPLACE_WITH_IMAGE_NAME
       state_repository: Crafted-Beyond/REPLACE_WITH_PRIVATE_STATE_REPOSITORY
-      deploy_runs_on: '["self-hosted","linux"]'
+      deploy_runs_on: '"ubuntu-latest"'
       environment: ${{ inputs.environment || '' }}
       tag: ${{ inputs.tag || '' }}
       # App settings live in applications/<repository-name>/main.tf in the central repository.
     secrets:
       GH_TOKEN: ${{ secrets.GH_TOKEN }}
-      registry_username: ${{ secrets.DOCKERHUB_USERNAME }}
+      registry_username: ${{ vars.DOCKERHUB_USERNAME }}
       registry_password: ${{ secrets.DOCKERHUB_TOKEN }}
       kubeconfig: ${{ secrets.KUBECONFIG }}
-      chart_repository_url: ${{ secrets.CHART_REPOSITORY_URL }}
+      chart_repository_url: ${{ vars.CHART_REPOSITORY_URL }}
       image_pull_username: ${{ secrets.IMAGE_PULL_USERNAME }}
       image_pull_password: ${{ secrets.IMAGE_PULL_PASSWORD }}

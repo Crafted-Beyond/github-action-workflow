@@ -19,6 +19,9 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/hashicorp/hcl/v2/hclparse"
+	"github.com/zclconf/go-cty/cty"
 )
 
 type label struct {
@@ -1030,6 +1033,49 @@ func (c *controller) deploymentPrepare() error {
 	preview := os.Getenv("GITHUB_EVENT_NAME") == "issue_comment"
 	tag, sha := os.Getenv("BUILD_TAG"), os.Getenv("BUILD_SHA")
 	environment := os.Getenv("DEPLOY_ENVIRONMENT")
+	directory, err := infrastructureDirectory()
+	if err != nil {
+		return err
+	}
+	if filename := os.Getenv("DEPLOYMENT_VAR_FILE"); filename != "" {
+		if !regexp.MustCompile(`^(?:[A-Za-z0-9_-]+/)*[A-Za-z0-9_-]+\.tfvars(?:\.json)?$`).MatchString(filename) {
+			return errors.New("deployment_var_file must be a relative .tfvars or .tfvars.json path without traversal")
+		}
+		path := filepath.Join(os.Getenv("GITHUB_WORKSPACE"), directory, filename)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return fmt.Errorf("cannot read selected deployment tfvars: %w", err)
+		}
+		parser := hclparse.NewParser()
+		parse := parser.ParseHCL
+		if strings.HasSuffix(filename, ".json") {
+			parse = parser.ParseJSON
+		}
+		file, diagnostics := parse(data, path)
+		if diagnostics.HasErrors() {
+			return fmt.Errorf("cannot parse selected deployment tfvars: %s", diagnostics.Error())
+		}
+		attributes, diagnostics := file.Body.JustAttributes()
+		if diagnostics.HasErrors() {
+			return fmt.Errorf("invalid deployment tfvars attributes: %s", diagnostics.Error())
+		}
+		attribute, exists := attributes["environment"]
+		if !exists {
+			return errors.New("selected deployment tfvars must define environment")
+		}
+		value, diagnostics := attribute.Expr.Value(nil)
+		if diagnostics.HasErrors() || !value.IsKnown() || value.IsNull() || value.Type() != cty.String {
+			return errors.New("deployment tfvars environment must be a literal, nonempty string")
+		}
+		selectedEnvironment := value.AsString()
+		if strings.TrimSpace(selectedEnvironment) == "" {
+			return errors.New("deployment tfvars environment must be a literal, nonempty string")
+		}
+		if !preview && selectedEnvironment != environment {
+			return errors.New("selected GitHub environment must match environment in the deployment tfvars")
+		}
+		environment = selectedEnvironment
+	}
 	if preview {
 		if os.Getenv("BUILD_PREVIEW") != "true" || !shaPattern.MatchString(sha) || tag != prTag(c.event.PullRequest.Number, sha) {
 			return errors.New("preview requires a successfully published /combine-deploy image")
@@ -1053,10 +1099,6 @@ func (c *controller) deploymentPrepare() error {
 		if err != nil {
 			return err
 		}
-	}
-	directory, err := infrastructureDirectory()
-	if err != nil {
-		return err
 	}
 	registry, err := c.registryClient()
 	if err != nil {
@@ -1367,6 +1409,7 @@ func deploymentCleanup() error {
 	paths := []string{
 		filepath.Join(os.Getenv("RUNNER_TEMP"), "combine-kubeconfig"),
 		filepath.Join(os.Getenv("RUNNER_TEMP"), "combine.auto.tfvars.json"),
+		filepath.Join(os.Getenv("RUNNER_TEMP"), "combine-gitconfig"),
 		filepath.Join(root, "combine.auto.tfvars.json"),
 		filepath.Join(root, "tfplan"),
 		filepath.Join(root, "crash.log"),
@@ -1385,6 +1428,7 @@ func deploymentCleanup() error {
 	for _, path := range []string{
 		filepath.Join(os.Getenv("GITHUB_WORKSPACE"), ".combine-state"),
 		filepath.Join(root, ".terraform"),
+		filepath.Join(os.Getenv("GITHUB_WORKSPACE"), "registry-control"),
 	} {
 		if err := os.RemoveAll(path); err != nil {
 			return fmt.Errorf("could not clean deployment working directory: %w", err)
@@ -1392,6 +1436,26 @@ func deploymentCleanup() error {
 	}
 	if preserve {
 		return fmt.Errorf("state could not be pushed; terraform.tfstate and backup remain in %s for manual recovery and contain sensitive data", directory)
+	}
+	if err := os.RemoveAll(filepath.Join(os.Getenv("GITHUB_WORKSPACE"), "infrastructure")); err != nil {
+		return fmt.Errorf("could not clean infrastructure checkout: %w", err)
+	}
+	return nil
+}
+
+func buildCleanup() error {
+	workspace, temporary := os.Getenv("GITHUB_WORKSPACE"), os.Getenv("RUNNER_TEMP")
+	if workspace == "" || temporary == "" {
+		return errors.New("runner workspace and temporary directory are required for build cleanup")
+	}
+	for _, path := range []string{
+		filepath.Join(workspace, "source"),
+		filepath.Join(workspace, "registry-control"),
+		filepath.Join(temporary, "combine-docker"),
+	} {
+		if err := os.RemoveAll(path); err != nil {
+			return fmt.Errorf("could not remove build checkout or credentials: %w", err)
+		}
 	}
 	return nil
 }
@@ -1402,6 +1466,9 @@ func run() error {
 	}
 	if os.Args[1] == "deployment-cleanup" {
 		return deploymentCleanup()
+	}
+	if os.Args[1] == "build-cleanup" {
+		return buildCleanup()
 	}
 	if os.Args[1] == "deployment-outputs" {
 		return deploymentOutputs()
