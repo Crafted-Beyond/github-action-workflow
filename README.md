@@ -86,7 +86,12 @@ Terraform modules and charts must also be configured.
 Reusable workflow: [docker-image.yml](./.github/workflows/docker-image.yml).
 Copy the [caller example](./examples/docker-image-caller.yml) into an application's
 `.github/workflows/` directory and replace its image name. Docker Hub is the
-default; create the Docker Hub repository first.
+default. Build preflight creates a missing Docker Hub repository as **private**
+using the configured namespace/name, then verifies repository and tag-list
+access. Existing repositories retain their visibility. The Docker Hub credential
+must have repository-creation permission in that namespace, and the account
+must have available private-repository capacity; otherwise preflight fails
+explicitly. Custom registry adapters retain their existing provisioning behavior.
 
 The caller must include comment events and merged-PR events:
 

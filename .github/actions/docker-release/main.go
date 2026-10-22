@@ -730,8 +730,8 @@ func (r *registryClient) ensureRepository() error {
 		return errors.New("Docker Hub repository creation requires namespace/repository")
 	}
 	status, createErr := r.controller.request("POST", "https://hub.docker.com/v2/repositories/", "JWT "+r.token, map[string]any{
-		"namespace": parts[0],
-		"name":      parts[1],
+		"namespace":  parts[0],
+		"name":       parts[1],
 		"is_private": true,
 	}, nil)
 	if createErr != nil && status != http.StatusConflict {
