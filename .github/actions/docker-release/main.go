@@ -713,6 +713,41 @@ func (c *controller) registryClient() (*registryClient, error) {
 	return result, nil
 }
 
+func (r *registryClient) ensureRepository() error {
+	if r.script != "" {
+		return nil
+	}
+	address := "https://hub.docker.com/v2/repositories/" + r.controller.image + "/"
+	status, err := r.controller.request("GET", address, "JWT "+r.token, nil, nil)
+	if err != nil {
+		return fmt.Errorf("cannot check Docker Hub repository access: %w", err)
+	}
+	if status != http.StatusNotFound {
+		return nil
+	}
+	parts := strings.Split(r.controller.image, "/")
+	if len(parts) != 2 {
+		return errors.New("Docker Hub repository creation requires namespace/repository")
+	}
+	status, createErr := r.controller.request("POST", "https://hub.docker.com/v2/repositories/", "JWT "+r.token, map[string]any{
+		"namespace": parts[0],
+		"name":      parts[1],
+		"is_private": true,
+	}, nil)
+	if createErr != nil && status != http.StatusConflict {
+		return fmt.Errorf("cannot create private Docker Hub repository; check namespace permissions and private repository quota: %w", createErr)
+	}
+	status, err = r.controller.request("GET", address, "JWT "+r.token, nil, nil)
+	if err != nil {
+		return fmt.Errorf("cannot verify Docker Hub repository after creation: %w", err)
+	}
+	if status == http.StatusNotFound {
+		return errors.New("Docker Hub repository remains inaccessible after creation")
+	}
+	fmt.Println("Docker Hub repository creation/access verified.")
+	return nil
+}
+
 func (r *registryClient) custom(operation, tag string, result any) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
@@ -1553,6 +1588,9 @@ func run() error {
 	case "preflight":
 		registry, err := c.registryClient()
 		if err != nil {
+			return err
+		}
+		if err := registry.ensureRepository(); err != nil {
 			return err
 		}
 		if _, err := registry.list(); err != nil {
