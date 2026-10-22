@@ -192,7 +192,7 @@ jobs:
           cache-from: |
             type=gha,version=2,scope=${{ steps.cache.outputs.write_scope }}
             type=gha,version=2,scope=${{ steps.cache.outputs.release_scope }}
-          cache-to: type=gha,version=2,scope=${{ steps.cache.outputs.write_scope }},mode=max
+          cache-to: type=gha,version=2,scope=${{ steps.cache.outputs.write_scope }},mode=max,ignore-error=true
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ steps.prepare.outputs.sha }}

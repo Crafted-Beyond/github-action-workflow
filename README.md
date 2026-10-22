@@ -219,6 +219,10 @@ architecture. QEMU enables ARM64 builds on an AMD64 runner.
 BuildKit imports/exports the GitHub Actions cache using the v2 cache API:
 
 - `mode=max` exports reusable intermediate build layers, not just final layers.
+- Cache export is best-effort (`ignore-error=true`): reservation conflicts,
+  quota limits or cache service failures are reported by BuildKit but do not
+  fail an otherwise successful image build/push. A later build may need to
+  rebuild uncached layers. Image build and registry push failures remain fatal.
 - Scope keys include registry, image, context, Dockerfile path and platforms.
 - Each PR writes its own cache; releases write a separate release cache.
 - PR builds can read their previous cache and the release cache when GitHub's
