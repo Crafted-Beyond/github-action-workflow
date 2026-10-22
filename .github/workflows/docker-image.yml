@@ -56,6 +56,9 @@ on:
         description: Pull request number.
         value: ${{ jobs.image.outputs.pr }}
     secrets:
+      GH_TOKEN:
+        description: GitHub token for API operations and repository checkouts.
+        required: true
       registry_username:
         required: true
       registry_password:
@@ -86,6 +89,7 @@ jobs:
       image: ${{ steps.prepare.outputs.image }}
       pr: ${{ steps.prepare.outputs.pr }}
     env:
+      GH_TOKEN: ${{ secrets.GH_TOKEN }}
       IMAGE_REPOSITORY: ${{ inputs.image }}
       IMAGE_REGISTRY: ${{ inputs.registry }}
       REGISTRY_ADAPTER: ${{ inputs.registry_adapter }}
@@ -107,6 +111,7 @@ jobs:
         with:
           ref: ${{ steps.prepare.outputs.sha }}
           repository: ${{ github.repository }}
+          token: ${{ secrets.GH_TOKEN }}
           persist-credentials: false
           path: source
 
@@ -115,6 +120,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.release_branch }}
+          token: ${{ secrets.GH_TOKEN }}
           persist-credentials: false
           path: registry-control
 

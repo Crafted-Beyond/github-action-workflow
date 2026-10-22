@@ -19,5 +19,6 @@ jobs:
       # registry defaults to docker.io
       platforms: linux/arm64
     secrets:
+      GH_TOKEN: ${{ secrets.GH_TOKEN }}
       registry_username: ${{ secrets.DOCKERHUB_USERNAME }}
       registry_password: ${{ secrets.DOCKERHUB_TOKEN }}

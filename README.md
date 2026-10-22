@@ -111,7 +111,8 @@ event; changing labels afterward is rejected.
 | `platforms` | `linux/arm64` | Raspberry Pi aarch64; optionally `linux/amd64,linux/arm64` for both architectures |
 | `runs_on` | `"ubuntu-latest"` | Runner labels expressed as JSON |
 
-Pass `registry_username` and `registry_password` as Actions secrets. For Docker
+Pass `GH_TOKEN` for GitHub API operations and repository checkouts, plus
+`registry_username` and `registry_password` as Actions secrets. For Docker
 Hub, use a username and access token with repository read/write/delete access.
 The workflow checks authentication and tag listing before publishing; listing
 cannot prove delete permission, so verify your token's permissions separately.
@@ -241,7 +242,7 @@ the workflow repository before enabling caller workflows.
 
 Use [combine-workflow.yml](./.github/workflows/combine-workflow.yml) with the
 [application caller example](./examples/combine-workflow-caller.yml). It reuses the
-Docker workflow above and the trusted `deployment/` root in
+Docker workflow above and one trusted `applications/<repository-name>/` root in
 `Crafted-Beyond/crb-craftedbeyond-k3s-terraform`. Publish both repositories'
 changes before enabling the caller. It does not install Argo CD, Gateway API,
 Istio, DNS infrastructure or cluster controllers.
@@ -269,24 +270,34 @@ and their images are protected from merge cleanup. No destroy command is added.
 For repository `wireguard-api`, PR 42 uses namespace, project, Application and
 Helm release `wireguard-api-pr42`; its hostname is
 `wireguard-api-pr42.<domain>`. The chart derives application Deployment, Service
-and HTTPRoute names from that release. Long/invalid repository names are
-DNS-normalized, with hash-based truncation when necessary.
+and HTTPRoute names from that release. The Terraform combine module validates
+names; override its base `name` for long or non-DNS-safe repository names.
 
 Actual environments default to the repository name for these resources. Use
 separate cluster credentials for environments sharing these names. If dev/prod
-share one cluster, set the GitHub environment variable `COMBINE_APPLICATION_NAME`
-(for example `wireguard-api-dev`) or the `application_name` workflow input.
-`COMBINE_DOMAIN` can override the domain per GitHub environment. State is always
+share one cluster, select a distinct module `name` in HCL based on
+`var.combine_runtime.environment` (for example `wireguard-api-dev`).
+Domain and environment-specific application settings also belong in HCL. State is always
 separate at `combine/<owner>/<repository>/<environment>/terraform.tfstate`;
 previews use environment `pr42`.
 
-Trusted `helm_values_json` supplies application ports, resources, probes,
-configuration and other existing chart options, including workflow definitions.
-`httpRoute.parentRefs` is required and must reference an existing Gateway.
-The workflow authoritatively sets the image, release fullname, image-pull Secret
-and hostname. Preview values cannot contain a fixed service-account name,
+Each central application root calls `module "combine"` and supplies native
+`helm_values` for ports, resources, probes, configuration and workflow definitions.
+Chart revision/path, domain, Argo CD namespace and optional application base name
+are Terraform module arguments, not workflow inputs. For routed applications,
+enable `helm_values.httpRoute` and configure its Gateway `parentRefs` in HCL.
+Workflow-only applications can omit routing entirely.
+The workflow passes a `combine_runtime` object containing only repository,
+environment, PR number, preview flag, full SHA, registry and immutable image/tag.
+Credentials are passed through secret environment variables, not application JSON.
+The module authoritatively sets the image, release fullname, image-pull Secret
+and optional hostname. Preview values cannot contain a fixed service-account name,
 extra Services or explicit HTTPRoute backendRefs that bypass release-derived
 naming. Use the chart's default backend for a preview.
+Each root must export `combine_deployment = module.combine.deployment` as an
+output; the workflow reads Terraform's application identity and route settings
+for health checks and reporting. See the central repository's
+`applications/example/main.tf` for a complete native HCL module call.
 
 Terraform creates the namespace, image-pull Secret, project-scoped HTTPS Git chart
 repository Secret, AppProject and Application using the existing registration
@@ -296,7 +307,7 @@ cascading deletion finalizer. Existing resources owned by another state require
 a deliberate migration/import, not a second owner.
 
 Deployment waits for a fresh Argo CD reconciliation, matching requested source,
-successful sync operation and healthy application. It also requires HTTPRoute
+successful sync operation and healthy application. When routing is enabled it requires HTTPRoute
 `Accepted` and `ResolvedRefs` for the current generation. Gateway listeners must
 allow routes from the preview namespaces; DNS/wildcard DNS and TLS must already
 route these hostnames to that Gateway. This checks controller readiness, not an
@@ -311,15 +322,12 @@ Retained previews keep their current image even after merge or label removal.
 | Configuration | Purpose |
 | --- | --- |
 | `image` | Existing registry namespace/repository |
-| `state_repository` / `state_ref` | Existing **private** Git repository/branch for encrypted state |
-| `domain` | Base hostname domain, without `https://` |
-| `helm_values_json` | Trusted app configuration and existing Gateway parentRefs |
+| `state_repository` / `state_ref` | Existing **private** Git repository/branch for state |
 | `deploy_runs_on` | Trusted runner labels; default `["self-hosted","linux"]` |
 | `infrastructure_repository` / `infrastructure_ref` | Trusted deployment code; default CraftedBeyond Terraform repository at `main` |
-| `chart_path` / `chart_revision` | Git chart location; default `k3s` / `main` |
-| `argocd_namespace` | Existing Argo CD namespace, default `argocd` |
+| `infrastructure_directory` | Central Terraform application root; default `applications/<calling-repository-name>` |
 | `environment` / `tag` | Explicit workflow_dispatch target and optional version |
-| `tofu_version` | OpenTofu >=1.8 for enforced state/plan encryption |
+| `tofu_version` | OpenTofu version; default `latest` |
 
 Docker inputs (`registry`, adapter, context, Dockerfile, platforms) retain their
 existing behavior. Use `build_runs_on` for build-runner labels.
@@ -328,14 +336,18 @@ existing behavior. Use `build_runs_on` for build-runner labels.
 | --- | --- |
 | `registry_username`, `registry_password` | Build/push/list/delete credentials; required |
 | `kubeconfig` | Selected cluster access; required for deployment |
-| `chart_repository_url` | HTTPS Git chart URL, required for deployment; no embedded credentials |
-| `chart_username`, `chart_password` | Pair for private chart repository read access; omit both for public charts |
-| `infrastructure_token` | Read access when the infrastructure repository is private |
-| `state_repo_token` | Read/write and metadata access to the private state repository |
-| `state_encryption_passphrase` | Stable secret >=32 characters, required for every deployment |
+| `chart_repository_url` | HTTPS chart Git URL on the same GitHub server, required for deployment; no embedded credentials |
+| `GH_TOKEN` | GitHub API, application/infrastructure checkouts, private state read/write and chart repository read access |
 | `image_pull_username`, `image_pull_password` | Optional paired read-only registry credentials for K3s; otherwise publisher credentials are used |
 
 The example maps uppercase application secrets to these reusable secret names.
+Use the existing repository/organization `GH_TOKEN` secret for all GitHub access;
+Argo CD receives it as the chart repository password with username
+`x-access-token`. The token must have access to every selected repository,
+contents write for application tags/state, pull-request write for titles and
+comments, and permission to read collaborator access. GitHub Actions `permissions`
+does not grant scopes to a personal access token; configure those on the token.
+The chart token is stored in a Kubernetes Secret and in deployment state.
 For environment-specific overrides, configure the **reusable secret names** in
 the GitHub environments (`preview`, `dev`, etc.). Protect actual environments
 with reviewers as appropriate. Build credentials are repository secrets; preview
@@ -345,9 +357,10 @@ deployment runner. The trusted deployment runner needs Git, kubectl, and network
 access to GitHub, the registry and K3s. OpenTofu is installed by the existing setup
 action.
 
-Both state and plans use OpenTofu native encryption before state is committed.
-Preserve the passphrase: losing/changing it without key migration makes existing
-state unreadable. Do not put secrets in chart values: Argo CD Application values
+State and saved plans are not encrypted and can contain registry/chart
+credentials. Keep the state repository private and restrict repository/runner
+access. State is not uploaded as an Actions artifact.
+Do not put secrets in chart values: Argo CD Application values
 are readable through the Kubernetes API. Prefer pre-existing application Secrets
 and chart Secret references.
 
@@ -359,13 +372,12 @@ serialize per environment; GitHub may replace pending jobs in that group, but
 never cancels the running deployment. Merge image publication is not in that
 group and is not dropped by environment serialization.
 
-State is pushed even after a partial apply. If pushing fails, an encrypted
-recovery-state artifact is retained for seven days and the deployment lock stays
-held. Inspect the failed run, restore that encrypted state to its exact private
+State is pushed even after a partial apply. If pushing fails, the deployment lock stays
+held. Inspect the failed run, restore the runner's local state to its exact private
 state path, then rerun the **failed deployment job**, not the whole image build.
 Never unlock and start from stale/empty state after a partial apply.
-If uploading recovery state also fails, the encrypted local state/backup are
-left in `infrastructure/deployment` for manual recovery rather than deleted;
+On a state push failure, local state/backup are
+left in the selected `infrastructure/applications/<repository-name>` root for manual recovery rather than deleted;
 other credential-bearing files are still cleaned.
 If the runner is abruptly terminated before state can be saved, recover its
 state before deleting its specific lock; ephemeral runners cannot guarantee

@@ -3,8 +3,20 @@ description: Validate release labels, serialize publications, version Git tags a
 inputs:
   operation:
     required: true
-    description: prepare, preflight, finalize, unlock, deployment-prepare, deployment-lock, deployment-complete, deployment-cleanup or report.
+    description: prepare, preflight, finalize, unlock, deployment-prepare, deployment-lock, deployment-outputs, deployment-complete, deployment-cleanup or report.
 outputs:
+  working_directory:
+    value: ${{ steps.control.outputs.working_directory }}
+    description: Trusted central application Terraform root.
+  namespace:
+    value: ${{ steps.control.outputs.namespace }}
+    description: Namespace returned by Terraform.
+  argocd_namespace:
+    value: ${{ steps.control.outputs.argocd_namespace }}
+    description: Argo CD namespace returned by Terraform.
+  route_enabled:
+    value: ${{ steps.control.outputs.route_enabled }}
+    description: Whether Terraform configured HTTPRoute.
   preview:
     value: ${{ steps.control.outputs.preview }}
     description: Whether this command requests an isolated PR preview.
@@ -59,6 +71,6 @@ runs:
       env:
         DOCKER_CONTROL_PATH: ${{ github.action_path }}
         DOCKER_CONTROL_OPERATION: ${{ inputs.operation }}
-        GH_TOKEN: ${{ github.token }}
+        GH_TOKEN: ${{ env.GH_TOKEN || github.token }}
       run: |
         go run "$DOCKER_CONTROL_PATH/main.go" "$DOCKER_CONTROL_OPERATION"

@@ -460,7 +460,7 @@ func (c *controller) unlock() error {
 		return nil
 	}
 	if owner.Mode == "deployment" && os.Getenv("STATE_SAFE") != "true" {
-		fmt.Println("::warning::Deployment state was not saved: retaining lock. Recover the encrypted state and rerun the same run.")
+		fmt.Println("::warning::Deployment state was not saved: retaining lock. Recover the state and rerun the same run.")
 		return nil
 	}
 	_, err = c.github("DELETE", "/git/refs/tags/"+c.lockName(), nil, nil)
@@ -1009,21 +1009,7 @@ func (c *controller) deploymentVersion(requested string) (string, string, error)
 	return "", "", errors.New("no matching stable release tag on the release branch; publish a release first")
 }
 
-func deploymentIdentity(repository, suffix string) string {
-	name := strings.ToLower(strings.Split(repository, "/")[1])
-	name = regexp.MustCompile(`[^a-z0-9-]+`).ReplaceAllString(name, "-")
-	name = strings.Trim(name, "-")
-	if len(name)+len(suffix) > 48 {
-		hash := sha256.Sum256([]byte(repository))
-		name = strings.TrimRight(name[:48-len(suffix)-9], "-") + fmt.Sprintf("-%x", hash[:4])
-	}
-	return name + suffix
-}
-
 func (c *controller) deploymentPrepare() error {
-	if len(os.Getenv("TF_VAR_state_encryption_passphrase")) < 32 || os.Getenv("STATE_REPO_TOKEN") == "" {
-		return errors.New("deployment requires a state_repo_token and a stable state_encryption_passphrase of at least 32 characters")
-	}
 	stateRepository := os.Getenv("STATE_REPOSITORY")
 	if !regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`).MatchString(stateRepository) {
 		return errors.New("state_repository must be owner/repository")
@@ -1031,15 +1017,12 @@ func (c *controller) deploymentPrepare() error {
 	var stateRepo struct {
 		Private bool `json:"private"`
 	}
-	status, err := c.request("GET", c.api+"/repos/"+stateRepository, "Bearer "+os.Getenv("STATE_REPO_TOKEN"), nil, &stateRepo)
+	status, err := c.request("GET", c.api+"/repos/"+stateRepository, "Bearer "+c.token, nil, &stateRepo)
 	if err != nil {
 		return err
 	}
 	if status == 404 || !stateRepo.Private {
-		return errors.New("state_repository must exist, be private and be accessible to state_repo_token")
-	}
-	if (os.Getenv("TF_VAR_chart_username") == "") != (os.Getenv("TF_VAR_chart_password") == "") {
-		return errors.New("provide both chart_username and chart_password for a private HTTPS chart repository")
+		return errors.New("state_repository must exist, be private and be accessible to GH_TOKEN")
 	}
 	if (os.Getenv("IMAGE_PULL_USERNAME") == "") != (os.Getenv("IMAGE_PULL_PASSWORD") == "") {
 		return errors.New("provide both image_pull_username and image_pull_password, or omit both")
@@ -1047,13 +1030,11 @@ func (c *controller) deploymentPrepare() error {
 	preview := os.Getenv("GITHUB_EVENT_NAME") == "issue_comment"
 	tag, sha := os.Getenv("BUILD_TAG"), os.Getenv("BUILD_SHA")
 	environment := os.Getenv("DEPLOY_ENVIRONMENT")
-	suffix := ""
 	if preview {
 		if os.Getenv("BUILD_PREVIEW") != "true" || !shaPattern.MatchString(sha) || tag != prTag(c.event.PullRequest.Number, sha) {
 			return errors.New("preview requires a successfully published /combine-deploy image")
 		}
 		environment = fmt.Sprintf("pr%d", c.event.PullRequest.Number)
-		suffix = "-" + environment
 	} else {
 		if os.Getenv("GITHUB_EVENT_NAME") != "workflow_dispatch" ||
 			os.Getenv("GITHUB_REF") != "refs/heads/"+os.Getenv("RELEASE_BRANCH") {
@@ -1073,73 +1054,9 @@ func (c *controller) deploymentPrepare() error {
 			return err
 		}
 	}
-	name := deploymentIdentity(c.event.Repository.FullName, suffix)
-	if !preview && os.Getenv("DEPLOY_APPLICATION_NAME") != "" {
-		name = os.Getenv("DEPLOY_APPLICATION_NAME")
-	}
-	if len(name) > 48 || !regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`).MatchString(name) {
-		return errors.New("deployment name must be DNS-safe and at most 48 characters")
-	}
-	domain := strings.TrimSpace(os.Getenv("DEPLOY_DOMAIN"))
-	hostname := name + "." + domain
-	if len(hostname) > 253 || !regexp.MustCompile(`^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$`).MatchString(hostname) {
-		return errors.New("deployment domain must be a valid lowercase DNS domain without scheme or path")
-	}
-	var values map[string]any
-	if err := json.Unmarshal([]byte(os.Getenv("HELM_VALUES_JSON")), &values); err != nil || values == nil {
-		return errors.New("helm_values_json must be a JSON object")
-	}
-	route, ok := values["httpRoute"].(map[string]any)
-	if !ok {
-		return errors.New("helm_values_json must include httpRoute.parentRefs for your existing Gateway")
-	}
-	parents, ok := route["parentRefs"].([]any)
-	if !ok || len(parents) == 0 {
-		return errors.New("configure at least one httpRoute.parentRefs entry for your existing Gateway")
-	}
-	for _, parent := range parents {
-		fields, ok := parent.(map[string]any)
-		if !ok {
-			return errors.New("HTTPRoute parentRefs must be objects")
-		}
-		parentName, ok := fields["name"].(string)
-		if !ok || parentName == "" {
-			return errors.New("each HTTPRoute parentRef requires a Gateway name")
-		}
-	}
-	// Fixed names in these fields bypass the chart's release-specific isolation.
-	if preview {
-		for _, key := range []string{"serviceAccount", "extraServices", "httpRoute"} {
-			if item, ok := values[key].(map[string]any); ok {
-				if key == "serviceAccount" && item["name"] != nil && item["name"] != "" {
-					return errors.New("preview serviceAccount.name must be empty so the chart uses its release name")
-				}
-				if key == "extraServices" && len(item) > 0 {
-					return errors.New("preview extraServices must be empty; use release-derived application Services")
-				}
-				if key == "httpRoute" {
-					if rules, ok := item["rules"].([]any); ok {
-						for _, entry := range rules {
-							rule, ok := entry.(map[string]any)
-							if !ok {
-								return errors.New("HTTPRoute rules must be objects")
-							}
-							if _, exists := rule["backendRefs"]; exists {
-								return errors.New("preview HTTPRoute rules must use the chart's default release-specific backend")
-							}
-						}
-					}
-				}
-			}
-		}
-	}
-	if strings.TrimSpace(os.Getenv("CHART_REPOSITORY_URL")) == "" || strings.TrimSpace(os.Getenv("CHART_REVISION")) == "" ||
-		strings.TrimSpace(os.Getenv("CHART_PATH")) == "" {
-		return errors.New("chart repository URL, revision and path are required")
-	}
-	chartURL, err := url.Parse(os.Getenv("CHART_REPOSITORY_URL"))
-	if err != nil || chartURL.Scheme != "https" || chartURL.Host == "" || chartURL.User != nil || chartURL.RawQuery != "" || chartURL.Fragment != "" {
-		return errors.New("chart_repository_url must be an HTTPS Git URL without embedded credentials")
+	directory, err := infrastructureDirectory()
+	if err != nil {
+		return err
 	}
 	registry, err := c.registryClient()
 	if err != nil {
@@ -1153,13 +1070,11 @@ func (c *controller) deploymentPrepare() error {
 		return errors.New("selected image tag is not published in the configured registry")
 	}
 	config := map[string]any{
-		"name": name, "repository_name": strings.Split(c.event.Repository.FullName, "/")[1],
-		"environment": environment, "hostname": hostname, "registry": c.registry,
-		"image_repository": c.registry + "/" + c.image, "image_tag": tag,
-		"chart_source": map[string]string{
-			"repo_url": os.Getenv("CHART_REPOSITORY_URL"), "target_revision": os.Getenv("CHART_REVISION"), "path": os.Getenv("CHART_PATH"),
+		"combine_runtime": map[string]any{
+			"repository": c.event.Repository.FullName, "environment": environment,
+			"pr_number": c.event.PullRequest.Number, "preview": preview, "sha": sha,
+			"registry": c.registry, "image_repository": c.registry + "/" + c.image, "image_tag": tag,
 		},
-		"helm_values": values, "argocd_namespace": os.Getenv("ARGOCD_NAMESPACE"),
 	}
 	data, err := json.Marshal(config)
 	if err != nil {
@@ -1169,9 +1084,67 @@ func (c *controller) deploymentPrepare() error {
 		return err
 	}
 	for _, item := range [][2]string{
-		{"name", name}, {"hostname", hostname}, {"tag", tag}, {"sha", sha},
+		{"working_directory", directory}, {"tag", tag}, {"sha", sha},
 		{"preview", fmt.Sprint(preview)}, {"environment", environment},
 		{"state_path", "combine/" + c.event.Repository.FullName + "/" + environment},
+	} {
+		if err := output(item[0], item[1]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func infrastructureDirectory() (string, error) {
+	directory := os.Getenv("INFRASTRUCTURE_DIRECTORY")
+	if directory == "" {
+		parts := strings.Split(os.Getenv("GITHUB_REPOSITORY"), "/")
+		if len(parts) != 2 {
+			return "", errors.New("missing repository identity")
+		}
+		directory = "applications/" + parts[1]
+	}
+	if !regexp.MustCompile(`^[A-Za-z0-9_-]+(/[A-Za-z0-9_-]+)*$`).MatchString(directory) {
+		return "", errors.New("infrastructure_directory must be a relative directory without dot segments")
+	}
+	return filepath.Join("infrastructure", directory), nil
+}
+
+func deploymentOutputs() error {
+	directory, err := infrastructureDirectory()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "tofu", "output", "-json", "combine_deployment")
+	cmd.Dir = filepath.Join(os.Getenv("GITHUB_WORKSPACE"), directory)
+	data, err := cmd.Output()
+	if err != nil {
+		return errors.New("Terraform root must export output combine_deployment from module.combine.deployment")
+	}
+	var result struct {
+		Name            string `json:"name"`
+		Namespace       string `json:"namespace"`
+		Hostname        string `json:"hostname"`
+		ArgoCDNamespace string `json:"argocd_namespace"`
+		RouteEnabled    bool   `json:"route_enabled"`
+		Image           string `json:"image"`
+	}
+	if err := json.Unmarshal(data, &result); err != nil {
+		return errors.New("invalid combine_deployment Terraform output")
+	}
+	for _, name := range []string{result.Name, result.Namespace, result.ArgoCDNamespace} {
+		if len(name) > 63 || !regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`).MatchString(name) {
+			return errors.New("combine_deployment must contain valid application, namespace and argocd_namespace names")
+		}
+	}
+	if result.Image != os.Getenv("IMAGE_REGISTRY")+"/"+os.Getenv("IMAGE_REPOSITORY")+":"+os.Getenv("BUILD_TAG") {
+		return errors.New("Terraform deployment output does not reference the selected image")
+	}
+	for _, item := range [][2]string{
+		{"name", result.Name}, {"namespace", result.Namespace}, {"hostname", result.Hostname},
+		{"argocd_namespace", result.ArgoCDNamespace}, {"route_enabled", fmt.Sprint(result.RouteEnabled)},
 	} {
 		if err := output(item[0], item[1]); err != nil {
 			return err
@@ -1292,9 +1265,13 @@ func (c *controller) deploymentComplete() error {
 			app.Status.OperationState.Phase == "Succeeded" &&
 			reflect.DeepEqual(app.Spec.Source, app.Status.OperationState.SyncResult.Source) &&
 			app.Status.Sync.Revision == app.Status.OperationState.SyncResult.Revision {
-			ready, err := routeReady(name)
-			if err != nil {
-				return err
+			ready := true
+			if os.Getenv("DEPLOY_ROUTE_ENABLED") == "true" {
+				var err error
+				ready, err = routeReady(os.Getenv("DEPLOY_NAMESPACE"), name)
+				if err != nil {
+					return err
+				}
 			}
 			if ready {
 				healthy = true
@@ -1333,8 +1310,8 @@ func (c *controller) deploymentComplete() error {
 	return output("healthy", "true")
 }
 
-func routeReady(name string) (bool, error) {
-	data, err := kubectl("-n", name, "get", "httproute", name, "-o", "json")
+func routeReady(namespace, name string) (bool, error) {
+	data, err := kubectl("-n", namespace, "get", "httproute", name, "-o", "json")
 	if err != nil {
 		return false, err
 	}
@@ -1382,18 +1359,23 @@ func deploymentCleanup() error {
 	if os.Getenv("GITHUB_WORKSPACE") == "" || os.Getenv("RUNNER_TEMP") == "" {
 		return errors.New("runner workspace and temporary directory are required for cleanup")
 	}
+	directory, err := infrastructureDirectory()
+	if err != nil {
+		return err
+	}
+	root := filepath.Join(os.Getenv("GITHUB_WORKSPACE"), directory)
 	paths := []string{
 		filepath.Join(os.Getenv("RUNNER_TEMP"), "combine-kubeconfig"),
 		filepath.Join(os.Getenv("RUNNER_TEMP"), "combine.auto.tfvars.json"),
-		filepath.Join(os.Getenv("GITHUB_WORKSPACE"), "infrastructure", "deployment", "combine.auto.tfvars.json"),
-		filepath.Join(os.Getenv("GITHUB_WORKSPACE"), "infrastructure", "deployment", "tfplan"),
-		filepath.Join(os.Getenv("GITHUB_WORKSPACE"), "infrastructure", "deployment", "crash.log"),
+		filepath.Join(root, "combine.auto.tfvars.json"),
+		filepath.Join(root, "tfplan"),
+		filepath.Join(root, "crash.log"),
 	}
 	preserve := os.Getenv("PRESERVE_DEPLOYMENT_STATE") == "true"
 	if !preserve {
 		paths = append(paths,
-			filepath.Join(os.Getenv("GITHUB_WORKSPACE"), "infrastructure", "deployment", "terraform.tfstate"),
-			filepath.Join(os.Getenv("GITHUB_WORKSPACE"), "infrastructure", "deployment", "terraform.tfstate.backup"))
+			filepath.Join(root, "terraform.tfstate"),
+			filepath.Join(root, "terraform.tfstate.backup"))
 	}
 	for _, path := range paths {
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -1402,14 +1384,14 @@ func deploymentCleanup() error {
 	}
 	for _, path := range []string{
 		filepath.Join(os.Getenv("GITHUB_WORKSPACE"), ".combine-state"),
-		filepath.Join(os.Getenv("GITHUB_WORKSPACE"), "infrastructure", "deployment", ".terraform"),
+		filepath.Join(root, ".terraform"),
 	} {
 		if err := os.RemoveAll(path); err != nil {
 			return fmt.Errorf("could not clean deployment working directory: %w", err)
 		}
 	}
 	if preserve {
-		return errors.New("state could not be pushed or uploaded; encrypted terraform.tfstate and backup remain in infrastructure/deployment for manual recovery")
+		return fmt.Errorf("state could not be pushed; terraform.tfstate and backup remain in %s for manual recovery and contain sensitive data", directory)
 	}
 	return nil
 }
@@ -1420,6 +1402,9 @@ func run() error {
 	}
 	if os.Args[1] == "deployment-cleanup" {
 		return deploymentCleanup()
+	}
+	if os.Args[1] == "deployment-outputs" {
+		return deploymentOutputs()
 	}
 	c := &controller{
 		registry: os.Getenv("IMAGE_REGISTRY"), image: os.Getenv("IMAGE_REPOSITORY"),

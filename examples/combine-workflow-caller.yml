@@ -28,30 +28,15 @@ jobs:
     with:
       image: craftedbeyond/REPLACE_WITH_IMAGE_NAME
       state_repository: Crafted-Beyond/REPLACE_WITH_PRIVATE_STATE_REPOSITORY
-      domain: apps.example.com
       deploy_runs_on: '["self-hosted","linux"]'
       environment: ${{ inputs.environment || '' }}
       tag: ${{ inputs.tag || '' }}
-      helm_values_json: |
-        {
-          "containerPorts": [
-            {"name": "http", "containerPort": 8080, "protocol": "TCP"}
-          ],
-          "httpRoute": {
-            "parentRefs": [
-              {"name": "REPLACE_WITH_GATEWAY", "namespace": "REPLACE_WITH_GATEWAY_NAMESPACE"}
-            ]
-          }
-        }
+      # App settings live in applications/<repository-name>/main.tf in the central repository.
     secrets:
+      GH_TOKEN: ${{ secrets.GH_TOKEN }}
       registry_username: ${{ secrets.DOCKERHUB_USERNAME }}
       registry_password: ${{ secrets.DOCKERHUB_TOKEN }}
       kubeconfig: ${{ secrets.KUBECONFIG }}
       chart_repository_url: ${{ secrets.CHART_REPOSITORY_URL }}
-      chart_username: ${{ secrets.CHART_USERNAME }}
-      chart_password: ${{ secrets.CHART_PASSWORD }}
-      infrastructure_token: ${{ secrets.INFRASTRUCTURE_TOKEN }}
-      state_repo_token: ${{ secrets.STATE_REPO_TOKEN }}
-      state_encryption_passphrase: ${{ secrets.STATE_ENCRYPTION_PASSPHRASE }}
       image_pull_username: ${{ secrets.IMAGE_PULL_USERNAME }}
       image_pull_password: ${{ secrets.IMAGE_PULL_PASSWORD }}

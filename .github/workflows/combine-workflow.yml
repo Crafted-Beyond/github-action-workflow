@@ -41,36 +41,19 @@ on:
         description: Trusted infrastructure revision, never PR-controlled code.
         type: string
         default: main
+      infrastructure_directory:
+        description: Application Terraform root in the trusted central repository; defaults to applications/<calling-repository-name>.
+        type: string
+        default: ""
       state_repository:
-        description: Private owner/repository for encrypted OpenTofu state.
+        description: Private owner/repository for OpenTofu state.
         type: string
         required: true
       state_ref:
         type: string
         default: main
-      chart_revision:
-        type: string
-        default: main
-      chart_path:
-        type: string
-        default: k3s
-      domain:
-        description: Base DNS domain, without scheme or path.
-        type: string
-        required: true
-      helm_values_json:
-        description: Trusted chart values, including httpRoute.parentRefs and application settings.
-        type: string
-        default: "{}"
-      argocd_namespace:
-        type: string
-        default: argocd
       environment:
         description: Manual workflow_dispatch environment only, for example dev.
-        type: string
-        default: ""
-      application_name:
-        description: Optional actual-environment resource name override for environments sharing one cluster.
         type: string
         default: ""
       tag:
@@ -78,10 +61,13 @@ on:
         type: string
         default: ""
       tofu_version:
-        description: OpenTofu 1.8 or newer; state and plans are encrypted.
+        description: OpenTofu version.
         type: string
         default: latest
     secrets:
+      GH_TOKEN:
+        description: GitHub token for API operations and application, infrastructure, state and chart repositories.
+        required: true
       registry_username:
         required: true
       registry_password:
@@ -90,16 +76,6 @@ on:
         required: false
       chart_repository_url:
         description: HTTPS Git URL of the chart repository.
-        required: false
-      chart_username:
-        required: false
-      chart_password:
-        required: false
-      infrastructure_token:
-        required: false
-      state_repo_token:
-        required: false
-      state_encryption_passphrase:
         required: false
       image_pull_username:
         required: false
@@ -127,6 +103,7 @@ jobs:
       runs_on: ${{ inputs.build_runs_on }}
       allow_preview: true
     secrets:
+      GH_TOKEN: ${{ secrets.GH_TOKEN }}
       registry_username: ${{ secrets.registry_username }}
       registry_password: ${{ secrets.registry_password }}
 
@@ -146,6 +123,7 @@ jobs:
       contents: write
       pull-requests: write
     env:
+      GH_TOKEN: ${{ secrets.GH_TOKEN }}
       IMAGE_REPOSITORY: ${{ inputs.image }}
       IMAGE_REGISTRY: ${{ inputs.registry }}
       REGISTRY_ADAPTER: ${{ inputs.registry_adapter }}
@@ -160,20 +138,12 @@ jobs:
       BUILD_PREVIEW: ${{ needs.image.outputs.preview }}
       DEPLOY_ENVIRONMENT: ${{ inputs.environment }}
       DEPLOY_TAG: ${{ inputs.tag }}
-      DEPLOY_DOMAIN: ${{ vars.COMBINE_DOMAIN || inputs.domain }}
-      DEPLOY_APPLICATION_NAME: ${{ vars.COMBINE_APPLICATION_NAME || inputs.application_name }}
-      HELM_VALUES_JSON: ${{ inputs.helm_values_json }}
-      CHART_REPOSITORY_URL: ${{ secrets.chart_repository_url }}
-      CHART_REVISION: ${{ inputs.chart_revision }}
-      CHART_PATH: ${{ inputs.chart_path }}
-      ARGOCD_NAMESPACE: ${{ inputs.argocd_namespace }}
+      INFRASTRUCTURE_DIRECTORY: ${{ inputs.infrastructure_directory }}
       STATE_REPOSITORY: ${{ inputs.state_repository }}
-      STATE_REPO_TOKEN: ${{ secrets.state_repo_token }}
       TF_VAR_registry_username: ${{ secrets.image_pull_username || secrets.registry_username }}
       TF_VAR_registry_password: ${{ secrets.image_pull_password || secrets.registry_password }}
-      TF_VAR_chart_username: ${{ secrets.chart_username }}
-      TF_VAR_chart_password: ${{ secrets.chart_password }}
-      TF_VAR_state_encryption_passphrase: ${{ secrets.state_encryption_passphrase }}
+      TF_VAR_github_token: ${{ secrets.GH_TOKEN }}
+      TF_VAR_chart_repository_url: ${{ secrets.chart_repository_url }}
       TF_IN_AUTOMATION: "true"
     steps:
       - name: Checkout trusted custom registry adapter
@@ -181,6 +151,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: ${{ github.repository }}
+          token: ${{ secrets.GH_TOKEN }}
           ref: ${{ inputs.release_branch }}
           path: registry-control
           persist-credentials: false
@@ -196,14 +167,15 @@ jobs:
         with:
           repository: ${{ inputs.infrastructure_repository }}
           ref: ${{ inputs.infrastructure_ref }}
-          token: ${{ secrets.infrastructure_token || github.token }}
+          token: ${{ secrets.GH_TOKEN }}
           path: infrastructure
           persist-credentials: false
 
-      - name: Prepare credentials and trusted chart values
+      - name: Prepare credentials and runtime metadata
         shell: bash
         env:
           CLUSTER_CONFIG: ${{ secrets.kubeconfig }}
+          WORKDIR: ${{ steps.deployment.outputs.working_directory }}
         run: |
           set -euo pipefail
           command -v kubectl >/dev/null || { echo "::error::Install kubectl on the deployment runner."; exit 1; }
@@ -212,10 +184,9 @@ jobs:
           export KUBECONFIG="$RUNNER_TEMP/combine-kubeconfig"
           printf 'KUBECONFIG=%s\nTF_VAR_kubeconfig_path=%s\n' "$KUBECONFIG" "$KUBECONFIG" >> "$GITHUB_ENV"
           printf '%s\n' "$CLUSTER_CONFIG" > "$KUBECONFIG"
-          cp "$RUNNER_TEMP/combine.auto.tfvars.json" infrastructure/deployment/combine.auto.tfvars.json
-          kubectl get namespace "$ARGOCD_NAMESPACE" >/dev/null
+          test -d "$WORKDIR" || { echo "::error::Create the application's Terraform root in the central infrastructure repository."; exit 1; }
+          cp "$RUNNER_TEMP/combine.auto.tfvars.json" "$WORKDIR/combine.auto.tfvars.json"
           kubectl get crd applications.argoproj.io appprojects.argoproj.io >/dev/null
-          kubectl get crd httproutes.gateway.networking.k8s.io >/dev/null
 
       - name: Install OpenTofu
         uses: Crafted-Beyond/github-action-workflow/.github/actions/setup-tofu@main
@@ -232,19 +203,19 @@ jobs:
         with:
           operation: deployment-lock
 
-      - name: Load isolated encrypted state
+      - name: Load isolated state
         id: state_pull
         uses: Crafted-Beyond/github-action-workflow/.github/actions/state-pull@main
         with:
           repository: ${{ inputs.state_repository }}
-          token: ${{ secrets.state_repo_token }}
+          token: ${{ secrets.GH_TOKEN }}
           ref: ${{ inputs.state_ref }}
           state_path: ${{ steps.deployment.outputs.state_path }}
-          working_directory: infrastructure/deployment
+          working_directory: ${{ steps.deployment.outputs.working_directory }}
           checkout_path: .combine-state
 
       - name: Initialize and validate deployment configuration
-        working-directory: infrastructure/deployment
+        working-directory: ${{ steps.deployment.outputs.working_directory }}
         shell: bash
         run: |
           set -euo pipefail
@@ -252,35 +223,34 @@ jobs:
           tofu validate -no-color
 
       - name: Plan the exact image deployment
-        working-directory: infrastructure/deployment
+        working-directory: ${{ steps.deployment.outputs.working_directory }}
         shell: bash
         run: tofu plan -input=false -no-color -out=tfplan
 
       - name: Apply deployment prerequisites and Argo CD Application
         id: apply
-        working-directory: infrastructure/deployment
+        working-directory: ${{ steps.deployment.outputs.working_directory }}
         shell: bash
         run: tofu apply -input=false -no-color tfplan
 
-      - name: Persist encrypted state even after a partial apply
+      - name: Persist state even after a partial apply
         id: state
         if: ${{ always() && (steps.apply.outcome == 'success' || steps.apply.outcome == 'failure') }}
         uses: Crafted-Beyond/github-action-workflow/.github/actions/state-push@main
         with:
           state_path: ${{ steps.deployment.outputs.state_path }}
           ref: ${{ inputs.state_ref }}
-          working_directory: infrastructure/deployment
+          working_directory: ${{ steps.deployment.outputs.working_directory }}
           checkout_path: .combine-state
 
-      - name: Preserve encrypted recovery state if saving failed
-        id: recovery
-        if: ${{ failure() && steps.state.outcome == 'failure' }}
-        uses: actions/upload-artifact@v4
+      - name: Read Terraform deployment outputs
+        id: configured
+        if: steps.apply.outcome == 'success' && steps.state.outcome == 'success'
+        uses: Crafted-Beyond/github-action-workflow/.github/actions/docker-release@main
+        env:
+          BUILD_TAG: ${{ steps.deployment.outputs.tag }}
         with:
-          name: encrypted-combine-state-${{ github.run_id }}
-          path: infrastructure/deployment/terraform.tfstate
-          if-no-files-found: error
-          retention-days: 7
+          operation: deployment-outputs
 
       - name: Wait for Argo CD health and clean up superseded preview images
         id: healthy
@@ -290,7 +260,10 @@ jobs:
           BUILD_SHA: ${{ steps.deployment.outputs.sha }}
           BUILD_TAG: ${{ steps.deployment.outputs.tag }}
           BUILD_PREVIEW: ${{ steps.deployment.outputs.preview }}
-          DEPLOY_NAME: ${{ steps.deployment.outputs.name }}
+          DEPLOY_NAME: ${{ steps.configured.outputs.name }}
+          DEPLOY_NAMESPACE: ${{ steps.configured.outputs.namespace }}
+          DEPLOY_ROUTE_ENABLED: ${{ steps.configured.outputs.route_enabled }}
+          ARGOCD_NAMESPACE: ${{ steps.configured.outputs.argocd_namespace }}
         with:
           operation: deployment-complete
 
@@ -308,9 +281,9 @@ jobs:
         env:
           REPORT_BODY: >-
             Deployment ${{ steps.healthy.outputs.healthy == 'true' && 'succeeded' || 'failed' }}.
-            Application: ${{ steps.deployment.outputs.name }}.
+            Application: ${{ steps.configured.outputs.name }}.
             Image: ${{ inputs.registry }}/${{ inputs.image }}:${{ steps.deployment.outputs.tag }}.
-            Hostname: ${{ steps.deployment.outputs.hostname }}.
+            Hostname: ${{ steps.configured.outputs.hostname }}.
             Preview environments are retained after PR merge/closure.
         with:
           operation: report
@@ -319,6 +292,6 @@ jobs:
         if: always()
         uses: Crafted-Beyond/github-action-workflow/.github/actions/docker-release@main
         env:
-          PRESERVE_DEPLOYMENT_STATE: ${{ steps.state.outcome == 'failure' && steps.recovery.outcome != 'success' }}
+          PRESERVE_DEPLOYMENT_STATE: ${{ steps.state.outcome == 'failure' }}
         with:
           operation: deployment-cleanup
