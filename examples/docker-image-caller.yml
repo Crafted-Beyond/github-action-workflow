@@ -1,4 +1,8 @@
 name: Docker image
+run-name: >-
+  ${{ github.event_name == 'pull_request' && (github.event.pull_request.merged && 'Release image build' || 'Closed PR (no build)') || 'PR image build request' }}
+  | ${{ join(github.event.pull_request.labels.*.name, ', ') || join(github.event.issue.labels.*.name, ', ') || 'no labels' }}
+  | PR #${{ github.event.issue.number || github.event.pull_request.number }}
 
 on:
   pull_request:

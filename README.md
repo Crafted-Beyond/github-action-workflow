@@ -83,6 +83,16 @@ Terraform modules and charts must also be configured.
 
 ## Docker image builds and semantic releases
 
+Caller run titles identify PR image requests, combine-deploy previews and merged
+release image builds, with the event's labels and PR number. Manual combine
+runs show the destination environment and requested tag (or latest stable).
+Publish the updated caller as well as the reusable workflows to see these names.
+Titles describe the request/event, not authorization or success: controller
+validation still rejects missing/conflicting labels and unauthorized commands.
+Job/step names distinguish build from deployment and display resolved image tags.
+Run titles retain the labels captured when the event was created; later label
+edits do not rename an existing run.
+
 Reusable workflow: [docker-image.yml](./.github/workflows/docker-image.yml).
 Copy the [caller example](./examples/docker-image-caller.yml) into an application's
 `.github/workflows/` directory and replace its image name. Docker Hub is the
@@ -115,6 +125,7 @@ restrict workflow/label changes. This is not an untrusted public-PR build servic
 | PR event/state | Result |
 | --- | --- |
 | Label added, PR opened/reopened, or new commit pushed | No build |
+| New commit arrives after a command is accepted | Finish that command's captured SHA; a new command is required for the newer commit |
 | Open/reopened PR: `major` label + new `/major` comment | Build current PR **head** commit |
 | Open/reopened PR: `minor` label + new `/minor` comment | Build current PR head commit |
 | Open/reopened PR: `patch` label + new `/patch` comment | Build current PR head commit |
@@ -126,7 +137,22 @@ restrict workflow/label changes. This is not an untrusted public-PR build servic
 | Merged into `main` with exactly one release label | Build exact merged commit and publish semantic version |
 
 Commands must be standalone `/major`, `/minor`, `/patch` or `/combine-deploy`
-comments. Only new comment events trigger PR work; historical comments are not
+comments. The controller captures the current PR SHA when it accepts the command
+in `prepare`, before waiting for the publication lock. Build checkout, image tag,
+finalization and preview deployment retain that SHA even if the PR head advances.
+This is the SHA observed at command acceptance, not necessarily at comment creation
+if the runner was queued. Closing the PR, invalidating labels or changing its
+repository authorization still blocks the run.
+For Docker Hub PR images, preparation checks the exact `pr-<number>-<last8SHA>`
+tag after validating its full-SHA reservation. If present with a valid manifest
+digest, it skips checkout/build/push and reuses that digest. Lookup/authentication
+errors fail explicitly rather than triggering an overwrite. Missing tags build
+normally; custom adapters retain their existing build behavior. Image finalization,
+authorization checks and `/combine-deploy` deployment still run. Terraform plans
+the desired infrastructure even when the image is reused; it may report no
+changes. Reusing a commit does not rebuild for changes outside that commit, such
+as an updated base image or different build settings.
+Only new comment events trigger PR work; historical comments are not
 searched or reused on later commits. A commenter needs write, maintain or admin
 permission. The PR must currently be open, including after reopening. Rerunning
 a failed run is recovery, not a new push trigger. Use only one caller (Docker-only

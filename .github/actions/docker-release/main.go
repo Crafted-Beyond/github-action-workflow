@@ -641,9 +641,9 @@ func (c *controller) prepare() error {
 	if err != nil {
 		return err
 	}
-	if !release && (fresh.State != "open" || fresh.Head.SHA != sha || freshLabel != label ||
+	if !release && (fresh.State != "open" || freshLabel != label ||
 		(command == "/combine-deploy" && !hasLabel(fresh, "combine-deploy"))) {
-		return errors.New("PR head or labels changed while waiting; post a new matching command")
+		return errors.New("PR state or labels changed while waiting; post a new matching command")
 	}
 	if release && freshLabel != label {
 		return errors.New("release label changed while waiting")
@@ -657,6 +657,18 @@ func (c *controller) prepare() error {
 		}
 	} else if err := c.reserveSHA(tag, sha); err != nil {
 		return err
+	} else if c.adapter != "custom" {
+		registry, err := c.registryClient()
+		if err != nil {
+			return err
+		}
+		digest, recorded, err = registry.publishedDigest(tag)
+		if err != nil {
+			return err
+		}
+		if recorded {
+			fmt.Printf("Reusing published PR image %s:%s; skipping build and push.\n", c.image, tag)
+		}
 	}
 	if len(tag) > 128 {
 		return errors.New("generated version exceeds the Docker image tag length limit")
@@ -711,6 +723,26 @@ func (c *controller) registryClient() (*registryClient, error) {
 	}
 	result.token = login.Token
 	return result, nil
+}
+
+func (r *registryClient) publishedDigest(tag string) (string, bool, error) {
+	var result struct {
+		Name   string `json:"name"`
+		Digest string `json:"digest"`
+	}
+	status, err := r.controller.request("GET",
+		"https://hub.docker.com/v2/repositories/"+r.controller.image+"/tags/"+url.PathEscape(tag)+"/",
+		"JWT "+r.token, nil, &result)
+	if err != nil {
+		return "", false, fmt.Errorf("cannot check existing PR image: %w", err)
+	}
+	if status == http.StatusNotFound {
+		return "", false, nil
+	}
+	if result.Name != tag || !digestPattern.MatchString(result.Digest) {
+		return "", false, errors.New("existing PR image response has an invalid tag or manifest digest; refusing reuse")
+	}
+	return result.Digest, true, nil
 }
 
 func (r *registryClient) ensureRepository() error {
@@ -868,8 +900,8 @@ func (c *controller) finalize() error {
 		if err != nil {
 			return err
 		}
-		if pr.State != "open" || pr.Head.SHA != sha {
-			return errors.New("PR changed during the image build; keeping existing images and refusing deployment, post a new command")
+		if pr.State != "open" {
+			return errors.New("PR closed during the image build; keeping existing images and refusing deployment")
 		}
 		label, err := selectedLabel(pr.Labels)
 		if err != nil {
@@ -1247,9 +1279,9 @@ func (c *controller) deploymentLock() error {
 		if err != nil {
 			return err
 		}
-		if pr.State != "open" || pr.Head.SHA != sha || label == "" || !hasLabel(pr, "combine-deploy") ||
+		if pr.State != "open" || label == "" || !hasLabel(pr, "combine-deploy") ||
 			pr.Head.Repo.FullName != c.event.Repository.FullName || pr.Base.Ref != os.Getenv("RELEASE_BRANCH") {
-			return errors.New("preview PR head, state or labels changed; post a new /combine-deploy command")
+			return errors.New("preview PR state, labels or repository authorization changed; post a new /combine-deploy command")
 		}
 	}
 	registry, err := c.registryClient()

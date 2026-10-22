@@ -98,6 +98,7 @@ permissions: {}
 
 jobs:
   image:
+    name: ${{ github.event_name == 'pull_request' && 'Release image only' || (github.event.comment.body == '/combine-deploy' && 'Combine-deploy preview build' || 'PR image only') }}
     if: github.event_name == 'issue_comment' || github.event_name == 'pull_request'
     permissions:
       contents: write
@@ -120,6 +121,7 @@ jobs:
       registry_password: ${{ secrets.registry_password }}
 
   deploy:
+    name: ${{ github.event_name == 'workflow_dispatch' && format('Deploy {0} - {1}', inputs.environment, inputs.tag || 'latest stable') || format('Combine-deploy preview - {0}', needs.image.outputs.tag) }}
     needs: image
     if: >-
       always() && !cancelled() &&

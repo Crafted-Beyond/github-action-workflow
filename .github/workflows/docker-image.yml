@@ -69,6 +69,10 @@ permissions: {}
 
 jobs:
   image:
+    name: >-
+      ${{ github.event_name == 'pull_request' && 'Release image build (no deploy)' ||
+          (github.event.comment.body == '/combine-deploy' && 'Combine-deploy preview image build' || 'PR image build') }}
+      | ${{ join(github.event.pull_request.labels.*.name, ', ') || join(github.event.issue.labels.*.name, ', ') || 'no labels' }}
     # Do not use pull_request_target to build untrusted PR Dockerfiles.
     if: >-
       (github.event_name == 'issue_comment' && github.event.action == 'created' && github.event.issue.pull_request &&
@@ -179,7 +183,7 @@ jobs:
           password: ${{ secrets.registry_password }}
           logout: false
 
-      - name: Build and publish immutable source
+      - name: Build and push ${{ steps.prepare.outputs.mode }} image - ${{ steps.prepare.outputs.tag }}
         if: steps.prepare.outputs.publish == 'true'
         id: publish
         uses: docker/build-push-action@v6
