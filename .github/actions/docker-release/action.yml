@@ -3,8 +3,29 @@ description: Validate release labels, serialize publications, version Git tags a
 inputs:
   operation:
     required: true
-    description: prepare, preflight, finalize or unlock.
+    description: prepare, preflight, finalize, unlock, deployment-prepare, deployment-lock, deployment-complete, deployment-cleanup or report.
 outputs:
+  preview:
+    value: ${{ steps.control.outputs.preview }}
+    description: Whether this command requests an isolated PR preview.
+  pr:
+    value: ${{ steps.control.outputs.pr }}
+    description: Pull request number.
+  name:
+    value: ${{ steps.control.outputs.name }}
+    description: Deployment identity.
+  hostname:
+    value: ${{ steps.control.outputs.hostname }}
+    description: Deployment hostname.
+  environment:
+    value: ${{ steps.control.outputs.environment }}
+    description: State environment.
+  state_path:
+    value: ${{ steps.control.outputs.state_path }}
+    description: Isolated Git state directory.
+  healthy:
+    value: ${{ steps.control.outputs.healthy }}
+    description: Argo CD reported the requested source synced and healthy.
   publish:
     value: ${{ steps.control.outputs.publish }}
     description: False when a recorded release needs cleanup only.

@@ -9,17 +9,19 @@ Copy the [caller example](./examples/docker-image-caller.yml) into an applicatio
 `.github/workflows/` directory and replace its image name. Docker Hub is the
 default; create the Docker Hub repository first.
 
-The caller must include these PR event types:
+The caller must include comment events and merged-PR events:
 
 ```yaml
 on:
   pull_request:
     branches: [main]
-    types: [opened, reopened, synchronize, labeled, unlabeled, closed]
+    types: [closed]
+  issue_comment:
+    types: [created]
 ```
 
 Do not use `pull_request_target`. Forks are skipped. Same-repository PR authors
-and anyone allowed to assign release labels must be trusted: the Dockerfile
+and anyone allowed to issue build commands must be trusted: the Dockerfile
 builds before merge with access to a registry-authenticated builder. Use a
 dedicated narrowly scoped registry token, protect the release branch, and
 restrict workflow/label changes. This is not an untrusted public-PR build service.
@@ -28,27 +30,43 @@ restrict workflow/label changes. This is not an untrusted public-PR build servic
 
 | PR event/state | Result |
 | --- | --- |
-| Open/reopen/new commit, no release label | Skip image build |
-| Exactly one `major`, `minor` or `patch` label | Build current PR **head** commit |
-| Release label added | Build current PR head commit |
-| Unrelated label added | No build |
-| Label removed | No build; still reject multiple remaining release labels |
+| Label added, PR opened/reopened, or new commit pushed | No build |
+| Open/reopened PR: `major` label + new `/major` comment | Build current PR **head** commit |
+| Open/reopened PR: `minor` label + new `/minor` comment | Build current PR head commit |
+| Open/reopened PR: `patch` label + new `/patch` comment | Build current PR head commit |
+| Command does not match the single release label | Reject and explain the required command |
+| `combine-deploy` without a release label | Reject, even with `/combine-deploy` |
+| `combine-deploy` + one release label + `/combine-deploy` | Build and preview-deploy through `combine-workflow` only |
 | Two or more release labels | Fail before building |
 | Closed without merge | No release |
 | Merged into `main` with exactly one release label | Build exact merged commit and publish semantic version |
 
-Temporary image tags are `pr-<PR-number>-<full-40-character-commit-SHA>`.
+Commands must be standalone `/major`, `/minor`, `/patch` or `/combine-deploy`
+comments. Only new comment events trigger PR work; historical comments are not
+searched or reused on later commits. A commenter needs write, maintain or admin
+permission. The PR must currently be open, including after reopening. Rerunning
+a failed run is recovery, not a new push trigger. Use only one caller (Docker-only
+or combined) per application, not both.
+
+Temporary image tags are `pr-<PR-number>-<last-8-characters-of-commit-SHA>`.
 The PR prefix is deliberate: bare SHA tags can be shared by different PRs,
 making safe PR-specific deletion impossible. These tags never contain a
-`major`/`minor`/`patch` version. Outdated queued PR head events are skipped.
-Changing one release label to another for the same SHA reuses that PR/SHA tag.
+`major`/`minor`/`patch` version. The full SHA is used for checkout and OCI revision
+metadata. Persistent `ci-docker-sha/*` Git refs bind each short image tag to its
+full commit; a suffix collision fails instead of overwriting another commit.
+Changing one release label to another for the same SHA reuses that PR/SHA tag
+only when a new matching command is posted.
 Removing the last label does not remove existing images or start a new build.
 
 After a successful PR publication and verification that its new tag exists,
-delete all older temporary tags **for that PR only**, keeping the current one.
+delete older temporary tags **for that PR only**, keeping the current one and
+any image protected by a retained preview.
 Old images are not deleted before their replacement is published. Cleanup
 also retries tags left by earlier failed cleanup, rather than only deleting
 one remembered previous tag.
+For a `/combine-deploy` publication, deletion is deferred until the preview becomes
+healthy. A failed preview update retains both the previous and attempted images.
+The cleanup matcher also recognizes legacy full-SHA PR image tags.
 
 On merge, read the greatest stable semantic Git tag reachable from the current
 release branch (both `1.2.3` and `v1.2.3` are accepted). Ignore prereleases and
@@ -64,8 +82,13 @@ Publish the image as `<registry>/<image>:1.2.3`, then create an annotated Git ta
 `v1.2.3` on the exact merged commit—not a moving `main` checkout. No `latest`
 image tag is created. The annotation records PR, image, source commit and digest
 for retry recovery. After the version image and Git tag exist, delete all
-temporary full-SHA tags for that PR. Other PRs and semantic-version tags are
-never cleanup candidates.
+temporary SHA tags for that PR, except those protected by a retained preview.
+Other PRs and semantic-version tags are never cleanup candidates. The merged PR
+title receives ` [image: 1.2.3]`, preserving its original text (truncated only to
+respect GitHub's title limit). Retries replace this workflow's suffix, not append
+duplicates. **Merging never deploys to an actual environment**, with or without
+`combine-deploy`. GitHub must confirm the PR is merged and its release label must
+match the merge event.
 
 A rerun of a release whose Git tag was already recorded performs cleanup only:
 it does not rebuild or overwrite the released image. A failed push may have
@@ -92,8 +115,10 @@ Pass `registry_username` and `registry_password` as Actions secrets. For Docker
 Hub, use a username and access token with repository read/write/delete access.
 The workflow checks authentication and tag listing before publishing; listing
 cannot prove delete permission, so verify your token's permissions separately.
-The caller needs `contents: write` and `pull-requests: read`. GitHub tag rules
-must allow release tags and `ci-docker-lock/*`; no bypass credentials are added.
+The caller needs `contents: write` and `pull-requests: write` for commands, PR
+feedback and the release-title update. GitHub tag rules must allow release tags,
+`ci-docker-lock/*`, `ci-docker-sha/*` and `ci-preview/*`; no bypass credentials
+are added.
 Self-hosted runners need Docker and network access to GitHub and the registry.
 Use ephemeral runners for PR builds.
 
@@ -112,7 +137,8 @@ BuildKit imports/exports the GitHub Actions cache using the v2 cache API:
 - Scope keys include registry, image, context, Dockerfile path and platforms.
 - Each PR writes its own cache; releases write a separate release cache.
 - PR builds can read their previous cache and the release cache when GitHub's
-  branch/cache access rules permit. Releases do not import PR-scoped caches.
+  branch/cache access rules permit. Comment-triggered runs execute on the default
+  branch, but still write separate PR scopes. Releases do not import PR-scoped caches.
 - Missing caches cause a normal full build. Cache export errors are not ignored.
 - Deleting old PR image tags does not delete the independent build cache.
 
@@ -201,7 +227,8 @@ Format the controller without executing it:
 gofmt -w .github/actions/docker-release/main.go
 ```
 
-Go formatting and YAML syntax checks were performed, but no tests or builds were run.
+Go compilation, Go formatting, YAML syntax and Actions expression checks were
+performed. No tests or Docker builds were run.
 No images were published, registry tags deleted or GitHub refs created by this
 local work. Actual end-to-end publication and cleanup remain unverified.
 
@@ -209,6 +236,145 @@ The reusable workflow references its action at `@main`, matching this
 repository's existing convention. Pin both workflow and internal action
 references to a reviewed commit/release for production. Publish these files in
 the workflow repository before enabling caller workflows.
+
+## CraftedBeyond combined application workflow
+
+Use [combine-workflow.yml](./.github/workflows/combine-workflow.yml) with the
+[application caller example](./examples/combine-workflow-caller.yml). It reuses the
+Docker workflow above and the trusted `deployment/` root in
+`Crafted-Beyond/crb-craftedbeyond-k3s-terraform`. Publish both repositories'
+changes before enabling the caller. It does not install Argo CD, Gateway API,
+Istio, DNS infrastructure or cluster controllers.
+
+### Three separate operations
+
+1. **PR image only:** one release label and its matching new command build a SHA
+   image. No deployment.
+2. **PR preview:** `combine-deploy` plus exactly one release label and a new
+   `/combine-deploy` comment build a SHA image and deploy it. `/major`, `/minor`
+   or `/patch` alone do not deploy, even if `combine-deploy` is present.
+3. **Actual environment:** use **Run workflow** from the release branch, choose
+   an environment and optionally supply `1.2.3` or `v1.2.3`. With no tag, select
+   the greatest stable semantic Git tag reachable from the release branch and
+   verify its corresponding registry image exists. This does not build an image.
+
+Merge automatically publishes the version selected by the single release label;
+no earlier command is required for the merge release. It updates the PR title
+and **does not run Terraform or deploy**, regardless of `combine-deploy`.
+Closing without merging does not build. Previews are kept after merge/closure,
+and their images are protected from merge cleanup. No destroy command is added.
+
+### Names, chart values and rollout
+
+For repository `wireguard-api`, PR 42 uses namespace, project, Application and
+Helm release `wireguard-api-pr42`; its hostname is
+`wireguard-api-pr42.<domain>`. The chart derives application Deployment, Service
+and HTTPRoute names from that release. Long/invalid repository names are
+DNS-normalized, with hash-based truncation when necessary.
+
+Actual environments default to the repository name for these resources. Use
+separate cluster credentials for environments sharing these names. If dev/prod
+share one cluster, set the GitHub environment variable `COMBINE_APPLICATION_NAME`
+(for example `wireguard-api-dev`) or the `application_name` workflow input.
+`COMBINE_DOMAIN` can override the domain per GitHub environment. State is always
+separate at `combine/<owner>/<repository>/<environment>/terraform.tfstate`;
+previews use environment `pr42`.
+
+Trusted `helm_values_json` supplies application ports, resources, probes,
+configuration and other existing chart options, including workflow definitions.
+`httpRoute.parentRefs` is required and must reference an existing Gateway.
+The workflow authoritatively sets the image, release fullname, image-pull Secret
+and hostname. Preview values cannot contain a fixed service-account name,
+extra Services or explicit HTTPRoute backendRefs that bypass release-derived
+naming. Use the chart's default backend for a preview.
+
+Terraform creates the namespace, image-pull Secret, project-scoped HTTPS Git chart
+repository Secret, AppProject and Application using the existing registration
+module. Argo CD deploys chart resources with automated sync/self-heal and **no
+automatic prune**. Namespace destruction is blocked, and Applications have no
+cascading deletion finalizer. Existing resources owned by another state require
+a deliberate migration/import, not a second owner.
+
+Deployment waits for a fresh Argo CD reconciliation, matching requested source,
+successful sync operation and healthy application. It also requires HTTPRoute
+`Accepted` and `ResolvedRefs` for the current generation. Gateway listeners must
+allow routes from the preview namespaces; DNS/wildcard DNS and TLS must already
+route these hostnames to that Gateway. This checks controller readiness, not an
+external HTTP smoke test.
+
+Only after a preview becomes healthy are older PR image tags deleted. Pending
+or failed deployments protect their images with `ci-preview/*` Git metadata.
+Retained previews keep their current image even after merge or label removal.
+
+### Required setup
+
+| Configuration | Purpose |
+| --- | --- |
+| `image` | Existing registry namespace/repository |
+| `state_repository` / `state_ref` | Existing **private** Git repository/branch for encrypted state |
+| `domain` | Base hostname domain, without `https://` |
+| `helm_values_json` | Trusted app configuration and existing Gateway parentRefs |
+| `deploy_runs_on` | Trusted runner labels; default `["self-hosted","linux"]` |
+| `infrastructure_repository` / `infrastructure_ref` | Trusted deployment code; default CraftedBeyond Terraform repository at `main` |
+| `chart_path` / `chart_revision` | Git chart location; default `k3s` / `main` |
+| `argocd_namespace` | Existing Argo CD namespace, default `argocd` |
+| `environment` / `tag` | Explicit workflow_dispatch target and optional version |
+| `tofu_version` | OpenTofu >=1.8 for enforced state/plan encryption |
+
+Docker inputs (`registry`, adapter, context, Dockerfile, platforms) retain their
+existing behavior. Use `build_runs_on` for build-runner labels.
+
+| Secret | Purpose |
+| --- | --- |
+| `registry_username`, `registry_password` | Build/push/list/delete credentials; required |
+| `kubeconfig` | Selected cluster access; required for deployment |
+| `chart_repository_url` | HTTPS Git chart URL, required for deployment; no embedded credentials |
+| `chart_username`, `chart_password` | Pair for private chart repository read access; omit both for public charts |
+| `infrastructure_token` | Read access when the infrastructure repository is private |
+| `state_repo_token` | Read/write and metadata access to the private state repository |
+| `state_encryption_passphrase` | Stable secret >=32 characters, required for every deployment |
+| `image_pull_username`, `image_pull_password` | Optional paired read-only registry credentials for K3s; otherwise publisher credentials are used |
+
+The example maps uppercase application secrets to these reusable secret names.
+For environment-specific overrides, configure the **reusable secret names** in
+the GitHub environments (`preview`, `dev`, etc.). Protect actual environments
+with reviewers as appropriate. Build credentials are repository secrets; preview
+deployments select the `preview` environment. Keep runner access restricted to
+trusted repositories, use ephemeral builders, and never run PR code on the
+deployment runner. The trusted deployment runner needs Git, kubectl, and network
+access to GitHub, the registry and K3s. OpenTofu is installed by the existing setup
+action.
+
+Both state and plans use OpenTofu native encryption before state is committed.
+Preserve the passphrase: losing/changing it without key migration makes existing
+state unreadable. Do not put secrets in chart values: Argo CD Application values
+are readable through the Kubernetes API. Prefer pre-existing application Secrets
+and chart Secret references.
+
+### Failure recovery and serialization
+
+Deployment holds the repository's publication lock while applying and waiting
+for health, preventing image cleanup racing a rollout. Deployment jobs also
+serialize per environment; GitHub may replace pending jobs in that group, but
+never cancels the running deployment. Merge image publication is not in that
+group and is not dropped by environment serialization.
+
+State is pushed even after a partial apply. If pushing fails, an encrypted
+recovery-state artifact is retained for seven days and the deployment lock stays
+held. Inspect the failed run, restore that encrypted state to its exact private
+state path, then rerun the **failed deployment job**, not the whole image build.
+Never unlock and start from stale/empty state after a partial apply.
+If uploading recovery state also fails, the encrypted local state/backup are
+left in `infrastructure/deployment` for manual recovery rather than deleted;
+other credential-bearing files are still cleaned.
+If the runner is abruptly terminated before state can be saved, recover its
+state before deleting its specific lock; ephemeral runners cannot guarantee
+recovery after an ungraceful crash. The Git state backend has no distributed
+locking outside this workflow: do not apply the same stack elsewhere.
+
+No tests were added. Go compilation, workflow schema/expression checks and
+OpenTofu configuration validation do not prove live registry, Kubernetes, DNS,
+or Argo CD behavior. No images, resources or state were published locally.
 
 ## OpenTofu CI/CD with a Git state backend
 

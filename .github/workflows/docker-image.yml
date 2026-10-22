@@ -35,6 +35,26 @@ on:
         description: Runner labels as JSON.
         type: string
         default: '"ubuntu-latest"'
+      allow_preview:
+        description: Internal integration flag; use combine-workflow for preview commands.
+        type: boolean
+        default: false
+    outputs:
+      preview:
+        description: A successful /combine-deploy image publication.
+        value: ${{ jobs.image.outputs.preview }}
+      sha:
+        description: Full immutable source SHA.
+        value: ${{ jobs.image.outputs.sha }}
+      tag:
+        description: Published container tag.
+        value: ${{ jobs.image.outputs.tag }}
+      image:
+        description: Published fully qualified image.
+        value: ${{ jobs.image.outputs.image }}
+      pr:
+        description: Pull request number.
+        value: ${{ jobs.image.outputs.pr }}
     secrets:
       registry_username:
         required: true
@@ -48,14 +68,23 @@ jobs:
   image:
     # Do not use pull_request_target to build untrusted PR Dockerfiles.
     if: >-
-      github.event_name == 'pull_request' &&
-      github.event.pull_request.head.repo.full_name == github.repository &&
-      github.event.pull_request.base.ref == inputs.release_branch
+      (github.event_name == 'issue_comment' && github.event.action == 'created' && github.event.issue.pull_request &&
+       contains(fromJSON('["/major","/minor","/patch","/combine-deploy"]'), github.event.comment.body)) ||
+      (github.event_name == 'pull_request' && github.event.action == 'closed' &&
+       github.event.pull_request.merged &&
+       github.event.pull_request.head.repo.full_name == github.repository &&
+       github.event.pull_request.base.ref == inputs.release_branch)
     runs-on: ${{ fromJSON(inputs.runs_on) }}
     timeout-minutes: 90
     permissions:
       contents: write
-      pull-requests: read
+      pull-requests: write
+    outputs:
+      preview: ${{ steps.prepare.outputs.preview }}
+      sha: ${{ steps.prepare.outputs.sha }}
+      tag: ${{ steps.prepare.outputs.tag }}
+      image: ${{ steps.prepare.outputs.image }}
+      pr: ${{ steps.prepare.outputs.pr }}
     env:
       IMAGE_REPOSITORY: ${{ inputs.image }}
       IMAGE_REGISTRY: ${{ inputs.registry }}
@@ -64,6 +93,7 @@ jobs:
       RELEASE_BRANCH: ${{ inputs.release_branch }}
       REGISTRY_USERNAME: ${{ secrets.registry_username }}
       REGISTRY_PASSWORD: ${{ secrets.registry_password }}
+      ALLOW_PREVIEW: ${{ inputs.allow_preview }}
     steps:
       - name: Validate event, labels and acquire publication lock
         id: prepare
@@ -76,6 +106,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ steps.prepare.outputs.sha }}
+          repository: ${{ github.repository }}
           persist-credentials: false
           path: source
 
@@ -110,7 +141,7 @@ jobs:
           CACHE_DOCKERFILE: ${{ inputs.dockerfile }}
           CACHE_PLATFORMS: ${{ inputs.platforms }}
           CACHE_MODE: ${{ steps.prepare.outputs.mode }}
-          CACHE_PR: ${{ github.event.pull_request.number }}
+          CACHE_PR: ${{ steps.prepare.outputs.pr }}
         run: |
           set -euo pipefail
           key="$(printf '%s\0' "$IMAGE_REGISTRY" "$IMAGE_REPOSITORY" "$CACHE_CONTEXT" "$CACHE_DOCKERFILE" "$CACHE_PLATFORMS" | sha256sum | cut -d' ' -f1)"
@@ -156,6 +187,7 @@ jobs:
           BUILD_SHA: ${{ steps.prepare.outputs.sha }}
           BUILD_TAG: ${{ steps.prepare.outputs.tag }}
           BUILD_MODE: ${{ steps.prepare.outputs.mode }}
+          BUILD_PREVIEW: ${{ steps.prepare.outputs.preview }}
           BUILD_DIGEST: ${{ steps.publish.outputs.digest || steps.prepare.outputs.digest }}
         with:
           operation: finalize
@@ -167,3 +199,11 @@ jobs:
           PUBLICATION_COMPLETE: ${{ steps.finalize.outcome == 'success' }}
         with:
           operation: unlock
+
+      - name: Report build failure
+        if: failure()
+        uses: Crafted-Beyond/github-action-workflow/.github/actions/docker-release@main
+        env:
+          REPORT_BODY: Image publication failed. Inspect this run before retrying; no environment deployment was requested by this job.
+        with:
+          operation: report

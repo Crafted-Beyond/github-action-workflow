@@ -3,11 +3,13 @@ name: Docker image
 on:
   pull_request:
     branches: [main]
-    types: [opened, reopened, synchronize, labeled, unlabeled, closed]
+    types: [closed]
+  issue_comment:
+    types: [created]
 
 permissions:
   contents: write
-  pull-requests: read
+  pull-requests: write
 
 jobs:
   image:

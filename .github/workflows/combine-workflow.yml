@@ -1,0 +1,324 @@
+name: CraftedBeyond combine workflow
+
+on:
+  workflow_call:
+    inputs:
+      image:
+        type: string
+        required: true
+      registry:
+        type: string
+        default: docker.io
+      registry_adapter:
+        type: string
+        default: dockerhub
+      registry_cleanup_script:
+        type: string
+        default: ""
+      release_branch:
+        type: string
+        default: main
+      context:
+        type: string
+        default: .
+      dockerfile:
+        type: string
+        default: Dockerfile
+      platforms:
+        type: string
+        default: linux/arm64
+      build_runs_on:
+        type: string
+        default: '"ubuntu-latest"'
+      deploy_runs_on:
+        description: Trusted runner with kubectl, Git and access to the on-prem K3s API.
+        type: string
+        default: '["self-hosted","linux"]'
+      infrastructure_repository:
+        type: string
+        default: Crafted-Beyond/crb-craftedbeyond-k3s-terraform
+      infrastructure_ref:
+        description: Trusted infrastructure revision, never PR-controlled code.
+        type: string
+        default: main
+      state_repository:
+        description: Private owner/repository for encrypted OpenTofu state.
+        type: string
+        required: true
+      state_ref:
+        type: string
+        default: main
+      chart_revision:
+        type: string
+        default: main
+      chart_path:
+        type: string
+        default: k3s
+      domain:
+        description: Base DNS domain, without scheme or path.
+        type: string
+        required: true
+      helm_values_json:
+        description: Trusted chart values, including httpRoute.parentRefs and application settings.
+        type: string
+        default: "{}"
+      argocd_namespace:
+        type: string
+        default: argocd
+      environment:
+        description: Manual workflow_dispatch environment only, for example dev.
+        type: string
+        default: ""
+      application_name:
+        description: Optional actual-environment resource name override for environments sharing one cluster.
+        type: string
+        default: ""
+      tag:
+        description: Manual deployment version; empty selects the highest stable Git version on the release branch.
+        type: string
+        default: ""
+      tofu_version:
+        description: OpenTofu 1.8 or newer; state and plans are encrypted.
+        type: string
+        default: latest
+    secrets:
+      registry_username:
+        required: true
+      registry_password:
+        required: true
+      kubeconfig:
+        required: false
+      chart_repository_url:
+        description: HTTPS Git URL of the chart repository.
+        required: false
+      chart_username:
+        required: false
+      chart_password:
+        required: false
+      infrastructure_token:
+        required: false
+      state_repo_token:
+        required: false
+      state_encryption_passphrase:
+        required: false
+      image_pull_username:
+        required: false
+      image_pull_password:
+        required: false
+
+permissions: {}
+
+jobs:
+  image:
+    if: github.event_name == 'issue_comment' || github.event_name == 'pull_request'
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: Crafted-Beyond/github-action-workflow/.github/workflows/docker-image.yml@main
+    with:
+      image: ${{ inputs.image }}
+      registry: ${{ inputs.registry }}
+      registry_adapter: ${{ inputs.registry_adapter }}
+      registry_cleanup_script: ${{ inputs.registry_cleanup_script }}
+      release_branch: ${{ inputs.release_branch }}
+      context: ${{ inputs.context }}
+      dockerfile: ${{ inputs.dockerfile }}
+      platforms: ${{ inputs.platforms }}
+      runs_on: ${{ inputs.build_runs_on }}
+      allow_preview: true
+    secrets:
+      registry_username: ${{ secrets.registry_username }}
+      registry_password: ${{ secrets.registry_password }}
+
+  deploy:
+    needs: image
+    if: >-
+      always() && !cancelled() &&
+      (github.event_name == 'workflow_dispatch' ||
+       (needs.image.result == 'success' && needs.image.outputs.preview == 'true'))
+    runs-on: ${{ fromJSON(inputs.deploy_runs_on) }}
+    timeout-minutes: 90
+    environment: ${{ github.event_name == 'workflow_dispatch' && inputs.environment || 'preview' }}
+    concurrency:
+      group: combine-deploy-${{ github.repository }}-${{ github.event.issue.number || inputs.environment }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      IMAGE_REPOSITORY: ${{ inputs.image }}
+      IMAGE_REGISTRY: ${{ inputs.registry }}
+      REGISTRY_ADAPTER: ${{ inputs.registry_adapter }}
+      REGISTRY_CLEANUP_SCRIPT: ${{ inputs.registry_cleanup_script }}
+      REGISTRY_USERNAME: ${{ secrets.registry_username }}
+      REGISTRY_PASSWORD: ${{ secrets.registry_password }}
+      IMAGE_PULL_USERNAME: ${{ secrets.image_pull_username }}
+      IMAGE_PULL_PASSWORD: ${{ secrets.image_pull_password }}
+      RELEASE_BRANCH: ${{ inputs.release_branch }}
+      BUILD_TAG: ${{ needs.image.outputs.tag }}
+      BUILD_SHA: ${{ needs.image.outputs.sha }}
+      BUILD_PREVIEW: ${{ needs.image.outputs.preview }}
+      DEPLOY_ENVIRONMENT: ${{ inputs.environment }}
+      DEPLOY_TAG: ${{ inputs.tag }}
+      DEPLOY_DOMAIN: ${{ vars.COMBINE_DOMAIN || inputs.domain }}
+      DEPLOY_APPLICATION_NAME: ${{ vars.COMBINE_APPLICATION_NAME || inputs.application_name }}
+      HELM_VALUES_JSON: ${{ inputs.helm_values_json }}
+      CHART_REPOSITORY_URL: ${{ secrets.chart_repository_url }}
+      CHART_REVISION: ${{ inputs.chart_revision }}
+      CHART_PATH: ${{ inputs.chart_path }}
+      ARGOCD_NAMESPACE: ${{ inputs.argocd_namespace }}
+      STATE_REPOSITORY: ${{ inputs.state_repository }}
+      STATE_REPO_TOKEN: ${{ secrets.state_repo_token }}
+      TF_VAR_registry_username: ${{ secrets.image_pull_username || secrets.registry_username }}
+      TF_VAR_registry_password: ${{ secrets.image_pull_password || secrets.registry_password }}
+      TF_VAR_chart_username: ${{ secrets.chart_username }}
+      TF_VAR_chart_password: ${{ secrets.chart_password }}
+      TF_VAR_state_encryption_passphrase: ${{ secrets.state_encryption_passphrase }}
+      TF_IN_AUTOMATION: "true"
+    steps:
+      - name: Checkout trusted custom registry adapter
+        if: inputs.registry_adapter == 'custom'
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ inputs.release_branch }}
+          path: registry-control
+          persist-credentials: false
+
+      - name: Resolve immutable image and deployment identity
+        id: deployment
+        uses: Crafted-Beyond/github-action-workflow/.github/actions/docker-release@main
+        with:
+          operation: deployment-prepare
+
+      - name: Checkout trusted deployment infrastructure
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.infrastructure_repository }}
+          ref: ${{ inputs.infrastructure_ref }}
+          token: ${{ secrets.infrastructure_token || github.token }}
+          path: infrastructure
+          persist-credentials: false
+
+      - name: Prepare credentials and trusted chart values
+        shell: bash
+        env:
+          CLUSTER_CONFIG: ${{ secrets.kubeconfig }}
+        run: |
+          set -euo pipefail
+          command -v kubectl >/dev/null || { echo "::error::Install kubectl on the deployment runner."; exit 1; }
+          test -n "$CLUSTER_CONFIG" || { echo "::error::The kubeconfig secret is required for deployment."; exit 1; }
+          umask 077
+          export KUBECONFIG="$RUNNER_TEMP/combine-kubeconfig"
+          printf 'KUBECONFIG=%s\nTF_VAR_kubeconfig_path=%s\n' "$KUBECONFIG" "$KUBECONFIG" >> "$GITHUB_ENV"
+          printf '%s\n' "$CLUSTER_CONFIG" > "$KUBECONFIG"
+          cp "$RUNNER_TEMP/combine.auto.tfvars.json" infrastructure/deployment/combine.auto.tfvars.json
+          kubectl get namespace "$ARGOCD_NAMESPACE" >/dev/null
+          kubectl get crd applications.argoproj.io appprojects.argoproj.io >/dev/null
+          kubectl get crd httproutes.gateway.networking.k8s.io >/dev/null
+
+      - name: Install OpenTofu
+        uses: Crafted-Beyond/github-action-workflow/.github/actions/setup-tofu@main
+        with:
+          tofu_version: ${{ inputs.tofu_version }}
+
+      - name: Serialize deployment and protect preview images
+        id: lock
+        uses: Crafted-Beyond/github-action-workflow/.github/actions/docker-release@main
+        env:
+          BUILD_SHA: ${{ steps.deployment.outputs.sha }}
+          BUILD_TAG: ${{ steps.deployment.outputs.tag }}
+          BUILD_PREVIEW: ${{ steps.deployment.outputs.preview }}
+        with:
+          operation: deployment-lock
+
+      - name: Load isolated encrypted state
+        id: state_pull
+        uses: Crafted-Beyond/github-action-workflow/.github/actions/state-pull@main
+        with:
+          repository: ${{ inputs.state_repository }}
+          token: ${{ secrets.state_repo_token }}
+          ref: ${{ inputs.state_ref }}
+          state_path: ${{ steps.deployment.outputs.state_path }}
+          working_directory: infrastructure/deployment
+          checkout_path: .combine-state
+
+      - name: Initialize and validate deployment configuration
+        working-directory: infrastructure/deployment
+        shell: bash
+        run: |
+          set -euo pipefail
+          tofu init -input=false -no-color
+          tofu validate -no-color
+
+      - name: Plan the exact image deployment
+        working-directory: infrastructure/deployment
+        shell: bash
+        run: tofu plan -input=false -no-color -out=tfplan
+
+      - name: Apply deployment prerequisites and Argo CD Application
+        id: apply
+        working-directory: infrastructure/deployment
+        shell: bash
+        run: tofu apply -input=false -no-color tfplan
+
+      - name: Persist encrypted state even after a partial apply
+        id: state
+        if: ${{ always() && (steps.apply.outcome == 'success' || steps.apply.outcome == 'failure') }}
+        uses: Crafted-Beyond/github-action-workflow/.github/actions/state-push@main
+        with:
+          state_path: ${{ steps.deployment.outputs.state_path }}
+          ref: ${{ inputs.state_ref }}
+          working_directory: infrastructure/deployment
+          checkout_path: .combine-state
+
+      - name: Preserve encrypted recovery state if saving failed
+        id: recovery
+        if: ${{ failure() && steps.state.outcome == 'failure' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: encrypted-combine-state-${{ github.run_id }}
+          path: infrastructure/deployment/terraform.tfstate
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Wait for Argo CD health and clean up superseded preview images
+        id: healthy
+        if: steps.apply.outcome == 'success' && steps.state.outcome == 'success'
+        uses: Crafted-Beyond/github-action-workflow/.github/actions/docker-release@main
+        env:
+          BUILD_SHA: ${{ steps.deployment.outputs.sha }}
+          BUILD_TAG: ${{ steps.deployment.outputs.tag }}
+          BUILD_PREVIEW: ${{ steps.deployment.outputs.preview }}
+          DEPLOY_NAME: ${{ steps.deployment.outputs.name }}
+        with:
+          operation: deployment-complete
+
+      - name: Release deployment lock
+        if: always()
+        uses: Crafted-Beyond/github-action-workflow/.github/actions/docker-release@main
+        env:
+          STATE_SAFE: ${{ (steps.apply.outcome != 'success' && steps.apply.outcome != 'failure') || steps.state.outcome == 'success' }}
+        with:
+          operation: unlock
+
+      - name: Report deployment result
+        if: always()
+        uses: Crafted-Beyond/github-action-workflow/.github/actions/docker-release@main
+        env:
+          REPORT_BODY: >-
+            Deployment ${{ steps.healthy.outputs.healthy == 'true' && 'succeeded' || 'failed' }}.
+            Application: ${{ steps.deployment.outputs.name }}.
+            Image: ${{ inputs.registry }}/${{ inputs.image }}:${{ steps.deployment.outputs.tag }}.
+            Hostname: ${{ steps.deployment.outputs.hostname }}.
+            Preview environments are retained after PR merge/closure.
+        with:
+          operation: report
+
+      - name: Clean secret-bearing runner files
+        if: always()
+        uses: Crafted-Beyond/github-action-workflow/.github/actions/docker-release@main
+        env:
+          PRESERVE_DEPLOYMENT_STATE: ${{ steps.state.outcome == 'failure' && steps.recovery.outcome != 'success' }}
+        with:
+          operation: deployment-cleanup

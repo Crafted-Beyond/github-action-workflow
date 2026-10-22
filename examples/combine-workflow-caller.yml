@@ -1,0 +1,57 @@
+name: CraftedBeyond application
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request:
+    branches: [main]
+    types: [closed]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Actual deployment environment.
+        type: environment
+        required: true
+        default: dev
+      tag:
+        description: Stable release version; empty selects the highest stable Git version on main.
+        type: string
+        required: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  combine:
+    uses: Crafted-Beyond/github-action-workflow/.github/workflows/combine-workflow.yml@main
+    with:
+      image: craftedbeyond/REPLACE_WITH_IMAGE_NAME
+      state_repository: Crafted-Beyond/REPLACE_WITH_PRIVATE_STATE_REPOSITORY
+      domain: apps.example.com
+      deploy_runs_on: '["self-hosted","linux"]'
+      environment: ${{ inputs.environment || '' }}
+      tag: ${{ inputs.tag || '' }}
+      helm_values_json: |
+        {
+          "containerPorts": [
+            {"name": "http", "containerPort": 8080, "protocol": "TCP"}
+          ],
+          "httpRoute": {
+            "parentRefs": [
+              {"name": "REPLACE_WITH_GATEWAY", "namespace": "REPLACE_WITH_GATEWAY_NAMESPACE"}
+            ]
+          }
+        }
+    secrets:
+      registry_username: ${{ secrets.DOCKERHUB_USERNAME }}
+      registry_password: ${{ secrets.DOCKERHUB_TOKEN }}
+      kubeconfig: ${{ secrets.KUBECONFIG }}
+      chart_repository_url: ${{ secrets.CHART_REPOSITORY_URL }}
+      chart_username: ${{ secrets.CHART_USERNAME }}
+      chart_password: ${{ secrets.CHART_PASSWORD }}
+      infrastructure_token: ${{ secrets.INFRASTRUCTURE_TOKEN }}
+      state_repo_token: ${{ secrets.STATE_REPO_TOKEN }}
+      state_encryption_passphrase: ${{ secrets.STATE_ENCRYPTION_PASSPHRASE }}
+      image_pull_username: ${{ secrets.IMAGE_PULL_USERNAME }}
+      image_pull_password: ${{ secrets.IMAGE_PULL_PASSWORD }}
