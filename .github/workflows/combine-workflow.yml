@@ -217,7 +217,7 @@ jobs:
         with:
           tofu_version: ${{ inputs.tofu_version }}
 
-      - name: Serialize deployment and protect preview images
+      - name: Serialize deployment and verify selected image
         id: lock
         uses: Crafted-Beyond/github-action-workflow/.github/actions/docker-release@main
         env:

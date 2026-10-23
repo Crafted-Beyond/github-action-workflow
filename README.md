@@ -169,13 +169,14 @@ only when a new matching command is posted.
 Removing the last label does not remove existing images or start a new build.
 
 After a successful PR publication and verification that its new tag exists,
-delete older temporary tags **for that PR only**, keeping the current one and
-any image protected by a retained preview.
+delete older temporary tags **for that PR only**, keeping the current one.
 Old images are not deleted before their replacement is published. Cleanup
 also retries tags left by earlier failed cleanup, rather than only deleting
 one remembered previous tag.
-For a `/combine-deploy` publication, deletion is deferred until the preview becomes
-healthy. A failed preview update retains both the previous and attempted images.
+This also applies to `/combine-deploy`: cleanup runs in image finalization,
+before Terraform or deployment health checks, including when reusing an already
+published image. Deployment failure does not restore deleted tags. An existing
+preview using an older image may therefore fail to pull it on pod restart.
 The cleanup matcher also recognizes legacy full-SHA PR image tags.
 
 On merge, read the greatest stable semantic Git tag reachable from the current
@@ -192,7 +193,7 @@ Publish the image as `<registry>/<image>:1.2.3`, then create an annotated Git ta
 `v1.2.3` on the exact merged commit—not a moving `main` checkout. No `latest`
 image tag is created. The annotation records PR, image, source commit and digest
 for retry recovery. After the version image and Git tag exist, delete all
-temporary SHA tags for that PR, except those protected by a retained preview.
+temporary SHA tags for that PR, including images used by retained previews.
 Other PRs and semantic-version tags are never cleanup candidates. The merged PR
 title receives ` [image: 1.2.3]`, preserving its original text (truncated only to
 respect GitHub's title limit). Retries replace this workflow's suffix, not append
@@ -384,8 +385,9 @@ this application-owned layout.
 Merge automatically publishes the version selected by the single release label;
 no earlier command is required for the merge release. It updates the PR title
 and **does not run Terraform or deploy**, regardless of `combine-deploy`.
-Closing without merging does not build. Previews are kept after merge/closure,
-and their images are protected from merge cleanup. No destroy command is added.
+Closing without merging does not build. Preview resources are kept after
+merge/closure, but their images are not protected from publication cleanup.
+No destroy command is added.
 
 ### Names, chart values and rollout
 
@@ -435,9 +437,9 @@ allow routes from the preview namespaces; DNS/wildcard DNS and TLS must already
 route these hostnames to that Gateway. This checks controller readiness, not an
 external HTTP smoke test.
 
-Only after a preview becomes healthy are older PR image tags deleted. Pending
-or failed deployments protect their images with `ci-preview/*` Git metadata.
-Retained previews keep their current image even after merge or label removal.
+Older same-PR image tags are deleted during image publication, independently of
+deployment state or health. Legacy `ci-preview/*` Git metadata no longer protects
+images from cleanup. Label removal alone does not trigger cleanup.
 
 ### Required setup
 
@@ -510,7 +512,8 @@ and chart Secret references.
 ### Failure recovery and serialization
 
 Deployment holds the repository's publication lock while applying and waiting
-for health, preventing image cleanup racing a rollout. Deployment jobs also
+for health, serializing it with image publication. Publication cleanup does not
+wait for the replacement deployment to start or become healthy. Deployment jobs also
 serialize per environment; GitHub may replace pending jobs in that group, but
 never cancels the running deployment. Merge image publication is not in that
 group and is not dropped by environment serialization.
@@ -531,8 +534,8 @@ is discarded. If the backend never received the state and the original file is
 unavailable, reconstruct ownership by importing the existing resources into the
 correct stack/state before any new apply. Review resource-specific import
 requirements; do not delete the deployed namespace or database volume to retry.
-Preview image cleanup intentionally waits for saved state and confirmed health,
-so superseded SHA tags remain after state-persistence or health-check failures.
+Preview image cleanup already runs during publication; subsequent state-persistence
+or health-check failures do not retain or restore superseded SHA tags.
 If the runner is abruptly terminated before state can be saved, recover its
 state before deleting its specific lock; ephemeral runners cannot guarantee
 recovery after an ungraceful crash. The Git state backend has no distributed

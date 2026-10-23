@@ -96,13 +96,6 @@ type releaseRecord struct {
 	Digest     string `json:"digest"`
 }
 
-type previewRecord struct {
-	Image     string   `json:"image"`
-	Tag       string   `json:"tag"`
-	SHA       string   `json:"sha"`
-	Protected []string `json:"protected,omitempty"`
-}
-
 type controller struct {
 	event    event
 	registry string
@@ -288,53 +281,6 @@ func (c *controller) command() (string, error) {
 		return "", errors.New("only repository writers, maintainers or administrators may trigger this command")
 	}
 	return command, nil
-}
-
-func (c *controller) previewName() string {
-	hash := sha256.Sum256([]byte(c.registry + "/" + c.image))
-	return fmt.Sprintf("ci-preview/%x/pr-%d", hash[:12], c.event.PullRequest.Number)
-}
-
-func (c *controller) preview() (*previewRecord, error) {
-	ref, err := c.ref(c.previewName())
-	if err != nil || ref == nil {
-		return nil, err
-	}
-	tag, err := c.tag(ref)
-	if err != nil {
-		return nil, err
-	}
-	var record previewRecord
-	if err := json.Unmarshal([]byte(tag.Message), &record); err != nil {
-		return nil, errors.New("invalid preview retention record")
-	}
-	if record.Image != c.registry+"/"+c.image || !shaPattern.MatchString(record.SHA) ||
-		(record.Tag != prTag(c.event.PullRequest.Number, record.SHA) &&
-			record.Tag != fmt.Sprintf("pr-%d-%s", c.event.PullRequest.Number, record.SHA)) {
-		return nil, errors.New("preview retention record does not match this image and PR")
-	}
-	return &record, nil
-}
-
-func (c *controller) savePreview(record previewRecord) error {
-	message, err := json.Marshal(record)
-	if err != nil {
-		return err
-	}
-	tagSHA, err := c.createTag(c.previewName(), record.SHA, string(message))
-	if err != nil {
-		return err
-	}
-	existing, err := c.ref(c.previewName())
-	if err != nil {
-		return err
-	}
-	if existing == nil {
-		_, err = c.github("POST", "/git/refs", map[string]string{"ref": "refs/tags/" + c.previewName(), "sha": tagSHA}, nil)
-	} else {
-		_, err = c.github("PATCH", "/git/refs/tags/"+c.previewName(), map[string]any{"sha": tagSHA, "force": true}, nil)
-	}
-	return err
 }
 
 func (c *controller) reserveSHA(tag, sha string) error {
@@ -984,30 +930,24 @@ func (c *controller) finalize() error {
 			return err
 		}
 	}
-	protected, err := c.preview()
-	if err != nil {
-		return err
-	}
-	if mode == "pr" && os.Getenv("BUILD_PREVIEW") == "true" {
-		fmt.Println("Deferring PR cleanup until a preview is healthy; retained previews must keep their image.")
-		return c.note("Published `" + c.registry + "/" + c.image + ":" + tag + "`. Preview images are retained until deployment succeeds.")
-	}
 	keep := ""
 	if mode == "pr" {
 		keep = tag
 	}
-	if err := c.cleanupTags(registry, tags, keep, protected); err != nil {
+	if err := c.cleanupTags(registry, tags, keep); err != nil {
 		return err
+	}
+	if mode == "pr" && os.Getenv("BUILD_PREVIEW") == "true" {
+		return c.note("Published `" + c.registry + "/" + c.image + ":" + tag + "`. Older same-PR image tags were deleted before deployment.")
 	}
 	return c.note("Published `" + c.registry + "/" + c.image + ":" + tag + "`. No actual-environment deployment was triggered.")
 }
 
-func (c *controller) cleanupTags(registry *registryClient, tags []string, keep string, protected *previewRecord) error {
+func (c *controller) cleanupTags(registry *registryClient, tags []string, keep string) error {
 	pattern := regexp.MustCompile(fmt.Sprintf(`^pr-%d-([a-f0-9]{8}|[a-f0-9]{40})$`, c.event.PullRequest.Number))
 	seen := map[string]bool{}
 	for _, candidate := range tags {
-		if !pattern.MatchString(candidate) || seen[candidate] || candidate == keep ||
-			(protected != nil && (candidate == protected.Tag || contains(protected.Protected, candidate))) {
+		if !pattern.MatchString(candidate) || seen[candidate] || candidate == keep {
 			continue
 		}
 		seen[candidate] = true
@@ -1295,19 +1235,6 @@ func (c *controller) deploymentLock() error {
 	if !contains(tags, os.Getenv("BUILD_TAG")) {
 		return errors.New("selected image disappeared while waiting for the deployment lock")
 	}
-	if os.Getenv("BUILD_PREVIEW") == "true" {
-		prior, err := c.preview()
-		if err != nil {
-			return err
-		}
-		record := previewRecord{Image: c.registry + "/" + c.image, Tag: os.Getenv("BUILD_TAG"), SHA: sha}
-		if prior != nil {
-			record.Protected = append(prior.Protected, prior.Tag)
-		}
-		if err := c.savePreview(record); err != nil {
-			return err
-		}
-	}
 	return nil
 }
 
@@ -1391,30 +1318,6 @@ func (c *controller) deploymentComplete() error {
 	}
 	if !healthy {
 		return errors.New("Argo CD and HTTPRoute did not become synced, healthy and accepted within 20 minutes")
-	}
-	if os.Getenv("BUILD_PREVIEW") == "true" {
-		sha, tag := os.Getenv("BUILD_SHA"), os.Getenv("BUILD_TAG")
-		if !shaPattern.MatchString(sha) || tag != prTag(c.event.PullRequest.Number, sha) {
-			return errors.New("invalid healthy preview image metadata")
-		}
-		record := previewRecord{Image: c.registry + "/" + c.image, Tag: tag, SHA: sha}
-		if err := c.savePreview(record); err != nil {
-			return err
-		}
-		registry, err := c.registryClient()
-		if err != nil {
-			return err
-		}
-		tags, err := registry.list()
-		if err != nil {
-			return err
-		}
-		if !contains(tags, tag) {
-			return errors.New("healthy preview image is no longer visible; refusing cleanup")
-		}
-		if err := c.cleanupTags(registry, tags, tag, &record); err != nil {
-			return err
-		}
 	}
 	return output("healthy", "true")
 }
