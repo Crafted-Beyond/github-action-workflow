@@ -2,6 +2,22 @@
 
 GitHub Actions workflow repository.
 
+## Automatic Docker Hub repository creation
+
+The shared Docker release preflight checks the caller's image repository and,
+when missing, creates it as **private**, then verifies access. This applies to
+every application using the standard Docker Hub adapter, not just WireGuard.
+Existing repositories retain their visibility. Creation failures never fall back
+to public images.
+
+For failed creation requests, recognized Docker Hub JSON messages are classified
+as authorization, namespace, or repository-allowance/subscription restrictions.
+Only fixed diagnostic text and the HTTP status are logged; raw response bodies
+and credentials are not printed. Unrecognized responses remain explicitly
+unclassified rather than assuming quota caused the failure. HTTP 403 still
+requires correcting Docker Hub account permissions, token access or allowance;
+the workflow cannot override provider restrictions.
+
 ## Application-only preview cleanup
 
 `.github/workflows/preview-cleanup.yml` is the reusable counterpart to combine

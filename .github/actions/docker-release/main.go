@@ -205,6 +205,9 @@ func (c *controller) request(method, address, authorization string, body, result
 		return response.StatusCode, errors.New("API mutation target not found")
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		if method == http.MethodPost && address == "https://hub.docker.com/v2/repositories/" {
+			return response.StatusCode, dockerRepositoryError(response.StatusCode, response.Body)
+		}
 		return response.StatusCode, fmt.Errorf("API request failed with HTTP %d", response.StatusCode)
 	}
 	if result != nil {
@@ -839,7 +842,7 @@ func (r *registryClient) ensureRepository() error {
 		"is_private": true,
 	}, nil)
 	if createErr != nil && status != http.StatusConflict {
-		return fmt.Errorf("cannot create private Docker Hub repository; check namespace permissions and private repository quota: %w", createErr)
+		return fmt.Errorf("cannot create private Docker Hub repository %s: %w", r.controller.image, createErr)
 	}
 	status, err = r.controller.request("GET", address, "JWT "+r.token, nil, nil)
 	if err != nil {
