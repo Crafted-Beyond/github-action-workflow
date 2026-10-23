@@ -83,6 +83,9 @@ jobs:
        github.event.pull_request.base.ref == inputs.release_branch)
     runs-on: ${{ fromJSON(inputs.runs_on) }}
     timeout-minutes: 90
+    concurrency:
+      group: combine-publication-${{ github.repository }}
+      cancel-in-progress: false
     permissions:
       contents: write
       pull-requests: write

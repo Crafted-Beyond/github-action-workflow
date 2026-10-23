@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -237,7 +238,37 @@ func hasLabel(pr pullRequest, name string) bool {
 }
 
 func prTag(number int, sha string) string {
-	return fmt.Sprintf("pr-%d-%s", number, sha[len(sha)-8:])
+	return fmt.Sprintf("pr%d-%s", number, sha[len(sha)-8:])
+}
+
+func (c *controller) validatePRImageSHA(sha string) error {
+	found := false
+	for page := 1; ; page++ {
+		var commits []struct{ SHA string }
+		status, err := c.github("GET", fmt.Sprintf("/pulls/%d/commits?per_page=100&page=%d", c.event.PullRequest.Number, page), nil, &commits)
+		if err != nil {
+			return err
+		}
+		if status == http.StatusNotFound {
+			return errors.New("PR commit history not found")
+		}
+		for _, commit := range commits {
+			if !shaPattern.MatchString(commit.SHA) {
+				return errors.New("PR commit history contains an invalid SHA")
+			}
+			if prTag(c.event.PullRequest.Number, commit.SHA) == prTag(c.event.PullRequest.Number, sha) && commit.SHA != sha {
+				return errors.New("PR commit history contains a short-SHA image tag collision")
+			}
+			found = found || commit.SHA == sha
+		}
+		if len(commits) < 100 {
+			break
+		}
+	}
+	if !found {
+		return errors.New("selected image commit is no longer in the PR history; post a new command")
+	}
+	return nil
 }
 
 func (c *controller) note(body string) error {
@@ -281,23 +312,6 @@ func (c *controller) command() (string, error) {
 		return "", errors.New("only repository writers, maintainers or administrators may trigger this command")
 	}
 	return command, nil
-}
-
-func (c *controller) reserveSHA(tag, sha string) error {
-	hash := sha256.Sum256([]byte(c.registry + "/" + c.image))
-	name := fmt.Sprintf("ci-docker-sha/%x/%s", hash[:12], tag)
-	ref, err := c.ref(name)
-	if err != nil {
-		return err
-	}
-	if ref != nil {
-		if ref.Object.Type != "commit" || ref.Object.SHA != sha {
-			return errors.New("last-eight SHA tag collision: refusing to overwrite a different commit")
-		}
-		return nil
-	}
-	_, err = c.github("POST", "/git/refs", map[string]string{"ref": "refs/tags/" + name, "sha": sha}, nil)
-	return err
 }
 
 func (c *controller) lockName() string {
@@ -350,6 +364,17 @@ func (c *controller) createTag(name, sha, message string) (string, error) {
 }
 
 func (c *controller) acquire(sha, mode string) error {
+	if mode == "pr" || (mode == "deployment" && os.Getenv("BUILD_PREVIEW") == "true") {
+		ref, err := c.ref(c.lockName())
+		if err != nil {
+			return err
+		}
+		if ref != nil {
+			return errors.New("legacy publication lock remains; reconcile the owning run before removing it; PR runs no longer create Git tags")
+		}
+		fmt.Println("PR operations are serialized by GitHub Actions concurrency; no Git tag created.")
+		return nil
+	}
 	record := ownership{os.Getenv("GITHUB_RUN_ID"), c.event.PullRequest.Number, c.registry + "/" + c.image, mode}
 	message, err := json.Marshal(record)
 	if err != nil {
@@ -393,6 +418,9 @@ func (c *controller) acquire(sha, mode string) error {
 }
 
 func (c *controller) unlock() error {
+	if os.Getenv("STATE_PATH") != "" {
+		return c.backendUnlock()
+	}
 	ref, err := c.ref(c.lockName())
 	if err != nil || ref == nil {
 		return err
@@ -413,6 +441,87 @@ func (c *controller) unlock() error {
 		return nil
 	}
 	_, err = c.github("DELETE", "/git/refs/tags/"+c.lockName(), nil, nil)
+	return err
+}
+
+type backendLock struct {
+	SHA     string `json:"sha"`
+	Content string `json:"content"`
+}
+
+func (c *controller) backendLockRequest(method string, body, result any) (int, error) {
+	repository, path, branch := os.Getenv("STATE_REPOSITORY"), os.Getenv("STATE_PATH"), os.Getenv("STATE_REF")
+	if !regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`).MatchString(repository) ||
+		!regexp.MustCompile(`^combine/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/[A-Za-z0-9_-]+$`).MatchString(path) ||
+		strings.Contains(path, "..") || branch == "" {
+		return 0, errors.New("backend lock requires a valid state repository, stable state path and state ref")
+	}
+	address := c.api + "/repos/" + repository + "/contents/" + path + "/deployment-lock.json"
+	if method == "GET" {
+		address += "?ref=" + url.QueryEscape(branch)
+	}
+	return c.request(method, address, "Bearer "+c.token, body, result)
+}
+
+func (c *controller) backendLockOwner() (*backendLock, ownership, error) {
+	var file backendLock
+	status, err := c.backendLockRequest("GET", nil, &file)
+	if err != nil || status == http.StatusNotFound {
+		return nil, ownership{}, err
+	}
+	data, err := base64.StdEncoding.DecodeString(strings.ReplaceAll(file.Content, "\n", ""))
+	if err != nil {
+		return nil, ownership{}, errors.New("backend lock has invalid content encoding")
+	}
+	var owner ownership
+	if err := json.Unmarshal(data, &owner); err != nil || owner.Run == "" || owner.Mode != "deployment" || file.SHA == "" {
+		return nil, ownership{}, errors.New("backend lock ownership is invalid; inspect it before recovery")
+	}
+	return &file, owner, nil
+}
+
+func (c *controller) backendAcquire() error {
+	record := ownership{os.Getenv("GITHUB_RUN_ID"), c.event.PullRequest.Number, c.registry + "/" + c.image, "deployment"}
+	file, owner, err := c.backendLockOwner()
+	if err != nil {
+		return err
+	}
+	if file != nil {
+		return fmt.Errorf("backend deployment lock is held by run %s at %s/deployment-lock.json; reconcile saved state before unlocking, including when retrying the same run", owner.Run, os.Getenv("STATE_PATH"))
+	}
+	data, err := json.Marshal(record)
+	if err != nil {
+		return err
+	}
+	_, err = c.backendLockRequest("PUT", map[string]string{
+		"message": "Lock deployment " + os.Getenv("STATE_PATH") + " run " + record.Run,
+		"content": base64.StdEncoding.EncodeToString(data),
+		"branch":  os.Getenv("STATE_REF"),
+	}, nil)
+	if err != nil {
+		return fmt.Errorf("could not atomically acquire backend deployment lock: %w", err)
+	}
+	fmt.Printf("Acquired backend lock at %s/deployment-lock.json.\n", os.Getenv("STATE_PATH"))
+	return nil
+}
+
+func (c *controller) backendUnlock() error {
+	file, owner, err := c.backendLockOwner()
+	if err != nil || file == nil {
+		return err
+	}
+	if owner.Run != os.Getenv("GITHUB_RUN_ID") || owner.Image != c.registry+"/"+c.image {
+		fmt.Printf("Backend lock belongs to run %s; leaving it unchanged.\n", owner.Run)
+		return nil
+	}
+	if os.Getenv("STATE_SAFE") != "true" {
+		fmt.Printf("::warning::State was not saved. Retaining %s/deployment-lock.json for run %s. Reconcile state before manually removing this file.\n", os.Getenv("STATE_PATH"), owner.Run)
+		return nil
+	}
+	_, err = c.backendLockRequest("DELETE", map[string]string{
+		"message": "Unlock deployment " + os.Getenv("STATE_PATH") + " run " + owner.Run,
+		"sha":     file.SHA, "branch": os.Getenv("STATE_REF"),
+	}, nil)
 	return err
 }
 
@@ -576,6 +685,11 @@ func (c *controller) prepare() error {
 	if !shaPattern.MatchString(sha) {
 		return errors.New("invalid source commit SHA")
 	}
+	if !release {
+		if err := c.validatePRImageSHA(sha); err != nil {
+			return err
+		}
+	}
 	if err := c.acquire(sha, mode); err != nil {
 		return err
 	}
@@ -601,8 +715,6 @@ func (c *controller) prepare() error {
 		if err != nil {
 			return err
 		}
-	} else if err := c.reserveSHA(tag, sha); err != nil {
-		return err
 	} else if c.adapter != "custom" {
 		registry, err := c.registryClient()
 		if err != nil {
@@ -816,19 +928,21 @@ func (c *controller) finalize() error {
 	if mode == "release" && !versionPattern.MatchString(tag) {
 		return errors.New("invalid release image tag")
 	}
-	ref, err := c.ref(c.lockName())
-	if err != nil {
-		return err
-	}
-	if ref == nil {
-		return errors.New("publication lock disappeared; refusing cleanup")
-	}
-	owner, err := c.owner(ref)
-	if err != nil {
-		return err
-	}
-	if owner != (ownership{os.Getenv("GITHUB_RUN_ID"), c.event.PullRequest.Number, c.registry + "/" + c.image, mode}) {
-		return errors.New("publication lock belongs to another publisher")
+	if mode == "release" {
+		ref, err := c.ref(c.lockName())
+		if err != nil {
+			return err
+		}
+		if ref == nil {
+			return errors.New("publication lock disappeared; refusing cleanup")
+		}
+		owner, err := c.owner(ref)
+		if err != nil {
+			return err
+		}
+		if owner != (ownership{os.Getenv("GITHUB_RUN_ID"), c.event.PullRequest.Number, c.registry + "/" + c.image, mode}) {
+			return errors.New("publication lock belongs to another publisher")
+		}
 	}
 	registry, err := c.registryClient()
 	if err != nil {
@@ -944,7 +1058,7 @@ func (c *controller) finalize() error {
 }
 
 func (c *controller) cleanupTags(registry *registryClient, tags []string, keep string) error {
-	pattern := regexp.MustCompile(fmt.Sprintf(`^pr-%d-([a-f0-9]{8}|[a-f0-9]{40})$`, c.event.PullRequest.Number))
+	pattern := regexp.MustCompile(fmt.Sprintf(`^(pr-?)?%d-([a-f0-9]{8}|[a-f0-9]{40})$`, c.event.PullRequest.Number))
 	seen := map[string]bool{}
 	for _, candidate := range tags {
 		if !pattern.MatchString(candidate) || seen[candidate] || candidate == keep {
@@ -1207,7 +1321,14 @@ func (c *controller) deploymentLock() error {
 	if !shaPattern.MatchString(sha) {
 		return errors.New("invalid deployment commit")
 	}
-	if err := c.acquire(sha, "deployment"); err != nil {
+	legacy, err := c.ref(c.lockName())
+	if err != nil {
+		return err
+	}
+	if legacy != nil {
+		return errors.New("legacy application-repository lock exists; reconcile its state and remove that specific lock before using backend locks")
+	}
+	if err := c.backendAcquire(); err != nil {
 		return err
 	}
 	if os.Getenv("BUILD_PREVIEW") == "true" {
@@ -1249,19 +1370,12 @@ func kubectl(args ...string) ([]byte, error) {
 }
 
 func (c *controller) deploymentComplete() error {
-	ref, err := c.ref(c.lockName())
+	file, owner, err := c.backendLockOwner()
 	if err != nil {
 		return err
 	}
-	if ref == nil {
-		return errors.New("deployment lock disappeared")
-	}
-	owner, err := c.owner(ref)
-	if err != nil {
-		return err
-	}
-	if owner != (ownership{os.Getenv("GITHUB_RUN_ID"), c.event.PullRequest.Number, c.registry + "/" + c.image, "deployment"}) {
-		return errors.New("deployment lock belongs to another run")
+	if file == nil || owner != (ownership{os.Getenv("GITHUB_RUN_ID"), c.event.PullRequest.Number, c.registry + "/" + c.image, "deployment"}) {
+		return errors.New("backend deployment lock is missing or belongs to another run")
 	}
 	namespace, name := os.Getenv("ARGOCD_NAMESPACE"), os.Getenv("DEPLOY_NAME")
 	start := time.Now().UTC().Truncate(time.Second)

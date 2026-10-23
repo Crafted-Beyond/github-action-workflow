@@ -143,7 +143,7 @@ finalization and preview deployment retain that SHA even if the PR head advances
 This is the SHA observed at command acceptance, not necessarily at comment creation
 if the runner was queued. Closing the PR, invalidating labels or changing its
 repository authorization still blocks the run.
-For Docker Hub PR images, preparation checks the exact `pr-<number>-<last8SHA>`
+For Docker Hub PR images, preparation checks the exact `pr<number>-<last8SHA>`
 tag after validating its full-SHA reservation. If present with a valid manifest
 digest, it skips checkout/build/push and reuses that digest. Lookup/authentication
 errors fail explicitly rather than triggering an overwrite. Missing tags build
@@ -158,12 +158,15 @@ permission. The PR must currently be open, including after reopening. Rerunning
 a failed run is recovery, not a new push trigger. Use only one caller (Docker-only
 or combined) per application, not both.
 
-Temporary image tags are `pr-<PR-number>-<last-8-characters-of-commit-SHA>`.
+Temporary image tags are `pr<number>-<last8SHA>`,
+for example `pr1-d56b7b41`.
 The PR prefix is deliberate: bare SHA tags can be shared by different PRs,
 making safe PR-specific deletion impossible. These tags never contain a
 `major`/`minor`/`patch` version. The full SHA is used for checkout and OCI revision
-metadata. Persistent `ci-docker-sha/*` Git refs bind each short image tag to its
-full commit; a suffix collision fails instead of overwriting another commit.
+metadata. Preparation checks the selected SHA against the PR commit history and
+rejects suffix collisions within that history. No Git tags are created for PRs.
+This check does not prove ownership of manually overwritten registry tags or
+commits removed by force-push; do not manually overwrite workflow image tags.
 Changing one release label to another for the same SHA reuses that PR/SHA tag
 only when a new matching command is posted.
 Removing the last label does not remove existing images or start a new build.
@@ -177,7 +180,8 @@ This also applies to `/combine-deploy`: cleanup runs in image finalization,
 before Terraform or deployment health checks, including when reusing an already
 published image. Deployment failure does not restore deleted tags. An existing
 preview using an older image may therefore fail to pull it on pod restart.
-The cleanup matcher also recognizes legacy full-SHA PR image tags.
+The cleanup matcher also recognizes legacy `pr-<number>-<SHA>` and `<number>-<SHA>` image tags
+with eight-character or full SHAs. Other PR numbers never match.
 
 On merge, read the greatest stable semantic Git tag reachable from the current
 release branch (both `1.2.3` and `v1.2.3` are accepted). Ignore prereleases and
@@ -229,8 +233,8 @@ The workflow checks authentication and tag listing before publishing; listing
 cannot prove delete permission, so verify your token's permissions separately.
 The caller needs `contents: write` and `pull-requests: write` for commands, PR
 feedback and the release-title update. GitHub tag rules must allow release tags,
-`ci-docker-lock/*`, `ci-docker-sha/*` and `ci-preview/*`; no bypass credentials
-are added.
+and `ci-docker-lock/*` for merged image releases; PR operations
+create no Git tags. No bypass credentials are added.
 Self-hosted runners need Docker and network access to GitHub and the registry.
 Use ephemeral runners for PR builds.
 
@@ -266,16 +270,21 @@ controller or run application tests.
 
 ### Publication serialization and failure recovery
 
-An atomic temporary annotated Git ref, `ci-docker-lock/<repository-hash>`,
-serializes publications across this repository. Git versions are repository-wide,
+GitHub Actions concurrency serializes image and deployment jobs per repository,
+without cancelling running jobs. GitHub may replace pending jobs in this group.
+PR builds and previews create no Git lock, SHA-reservation or preview tags.
+Legacy locks are checked and reported explicitly, not bypassed or automatically
+deleted. Existing recovery locks must be reconciled before migration.
+
+For merged image releases, an atomic temporary annotated
+Git ref, `ci-docker-lock/<repository-hash>`, also protects recovery.
+Git versions are repository-wide,
 not an independent version counter for each image. Call once per image/release
 stream; this is not a coordinated multi-image release workflow.
-Unlike Actions concurrency groups, it does not replace pending merge events.
-Do not add caller concurrency rules that cancel/replace queued release runs.
 Publishers wait up to 30 minutes for the lock, then fail explicitly.
 Lock order is acquisition order, not guaranteed PR merge order.
 
-Successful runs release their lock. Failed PR builds normally release it;
+Successful release runs release their Git lock;
 failed releases deliberately retain it to prevent version reuse. **Rerun the
 same failed workflow run**, not a new manually triggered run, to recover.
 If the Git tag was recorded, rerun skips rebuilding and retries cleanup.
@@ -426,7 +435,8 @@ for health checks and reporting. See the central repository's
 Terraform creates the namespace, image-pull Secret, project-scoped HTTPS Git chart
 repository Secret, AppProject and Application using the existing registration
 module. Argo CD deploys chart resources with automated sync/self-heal and **no
-automatic prune**. Namespace destruction is blocked, and Applications have no
+automatic prune**. Namespace destruction is blocked by default (callers with
+explicit PR cleanup can opt out for previews only), and Applications have no
 cascading deletion finalizer. Existing resources owned by another state require
 a deliberate migration/import, not a second owner.
 
@@ -511,15 +521,32 @@ and chart Secret references.
 
 ### Failure recovery and serialization
 
-Deployment holds the repository's publication lock while applying and waiting
-for health, serializing it with image publication. Publication cleanup does not
+Deployment shares the repository's Actions concurrency group with publication.
+Both preview and actual-environment deployments acquire a recovery lock file in
+the private state repository on `state_ref`, never a tag in the application repository.
+Publication cleanup does not
 wait for the replacement deployment to start or become healthy. Deployment jobs also
-serialize per environment; GitHub may replace pending jobs in that group, but
-never cancels the running deployment. Merge image publication is not in that
-group and is not dropped by environment serialization.
+serialize per repository; GitHub may replace pending jobs in that group, but
+never cancels the running deployment.
 
-State is pushed even after a partial apply. If pushing fails, the deployment lock stays
-held. Inspect the failed run, restore the runner's local state to its exact private
+State is shared by PR number, never by commit SHA. For example, every PR #1 run
+loads and updates `combine/Crafted-Beyond/wireguard-api/pr1/terraform.tfstate`.
+Its lock is the sibling `deployment-lock.json`, recording the owning run, PR,
+image repository and deployment mode. Creating that file without an existing
+file SHA atomically acquires ownership; concurrent attempts fail instead of
+overwriting it. Release uses the exact file SHA and does not remove state.
+
+State is pushed even after a partial apply. If pushing fails, the backend lock
+stays in place. A new run (including a retry of the same run) fails explicitly
+with the owning run and lock path rather than taking over.
+To recover: stop waiting runs, restore/import and verify the complete state at
+the same backend path, then delete only that stack's `deployment-lock.json`
+on `state_ref` after confirming the owning run is no longer active. Start a
+new deployment; it acquires a new lock and loads the same saved PR state.
+Do not delete `terraform.tfstate`, its backup or the stack directory to unlock.
+If there is a legacy `ci-docker-lock/*` application tag, reconcile its owning
+run's state before removing that specific legacy tag as a separate migration.
+Inspect the failed run, restore the runner's local state to its exact private
 state path, then rerun the **failed deployment job**, not the whole image build.
 Private module Git authentication is scoped to the initialize/validate shell
 step, not exported through `GITHUB_ENV`. Backend checkout supplies its own
@@ -537,7 +564,7 @@ requirements; do not delete the deployed namespace or database volume to retry.
 Preview image cleanup already runs during publication; subsequent state-persistence
 or health-check failures do not retain or restore superseded SHA tags.
 If the runner is abruptly terminated before state can be saved, recover its
-state before deleting its specific lock; ephemeral runners cannot guarantee
+state before deleting its specific backend lock file; ephemeral runners cannot guarantee
 recovery after an ungraceful crash. The Git state backend has no distributed
 locking outside this workflow: do not apply the same stack elsewhere.
 
