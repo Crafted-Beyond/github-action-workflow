@@ -8,6 +8,12 @@ inputs:
   title:
     description: Heading used in the summary. Defaults to the working directory.
     default: ""
+  direct:
+    description: Apply directly without a saved plan (for PR previews).
+    default: "false"
+  var_file:
+    description: Optional var-file for direct apply.
+    default: ""
 
 outputs:
   exitcode:
@@ -23,19 +29,29 @@ runs:
       working-directory: ${{ inputs.working_directory }}
       env:
         TITLE: ${{ inputs.title || inputs.working_directory }}
+        DIRECT: ${{ inputs.direct }}
+        VAR_FILE: ${{ inputs.var_file }}
       run: |
         set +e
         log="$RUNNER_TEMP/tofu-apply.log"
         md="$RUNNER_TEMP/tofu-apply.md"
 
-        echo "-> Running an apply from a fresh plan"
-        if tofu show -json tfplan > "$RUNNER_TEMP/tofu-apply.json" 2>/dev/null && tofu show -no-color tfplan > "$RUNNER_TEMP/tofu-apply.txt" 2>/dev/null; then
-          bash "$GITHUB_ACTION_PATH/../tofu-plan/log.sh" "$RUNNER_TEMP/tofu-apply.json" "$RUNNER_TEMP/tofu-apply.txt" "Apply Summary"
+        args=(-input=false -no-color)
+        if [ "$DIRECT" = true ]; then
+          echo "-> Direct PR apply (no separate plan)"
+          args+=(-auto-approve)
+          if [ -n "$VAR_FILE" ]; then args+=("-var-file=$VAR_FILE"); fi
+        else
+          echo "-> Applying the saved plan"
+          args+=(tfplan)
+          if tofu show -json tfplan > "$RUNNER_TEMP/tofu-apply.json" 2>/dev/null && tofu show -no-color tfplan > "$RUNNER_TEMP/tofu-apply.txt" 2>/dev/null; then
+            bash "$GITHUB_ACTION_PATH/../tofu-plan/log.sh" "$RUNNER_TEMP/tofu-apply.json" "$RUNNER_TEMP/tofu-apply.txt" "Apply Summary"
+          fi
         fi
         rm -f "$RUNNER_TEMP/tofu-apply.json"
 
         echo "::group::tofu apply"
-        tofu apply -input=false -no-color tfplan 2>&1 | tee "$log"
+        tofu apply "${args[@]}" 2>&1 | tee "$log"
         rc=${PIPESTATUS[0]}
         echo "::endgroup::"
 

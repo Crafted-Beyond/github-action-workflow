@@ -44,6 +44,7 @@ esac
 			if err := os.WriteFile(filepath.Join(dir, "tofu"), []byte(fake), 0700); err != nil {
 				t.Fatal(err)
 			}
+
 			prefix := filepath.Join(dir, "database-plan")
 			calls := filepath.Join(dir, "calls")
 			env := append(os.Environ(), "PATH="+dir+string(os.PathListSeparator)+os.Getenv("PATH"),
@@ -109,6 +110,50 @@ esac
 				if _, err := os.Stat(prefix + suffix); !os.IsNotExist(err) {
 					t.Fatalf("temporary report input remains: %s", suffix)
 				}
+			}
+
+		})
+	}
+}
+
+func TestDirectLifecycleApply(t *testing.T) {
+	_, file, _, _ := runtime.Caller(0)
+	script := filepath.Join(filepath.Dir(file), "..", "tofu-plan", "lifecycle.sh")
+	for _, code := range []string{"0", "1"} {
+		t.Run("exit "+code, func(t *testing.T) {
+			dir := t.TempDir()
+			fake := "#!/usr/bin/env bash\nset -eu\nprintf '%s\\n' \"$*\" >> \"$CALLS\"\ncase \"$1\" in\ninit|validate) exit 0;;\napply) echo 'Direct apply output'; exit \"$APPLY_CODE\";;\n*) exit 99;;\nesac\n"
+			if err := os.WriteFile(filepath.Join(dir, "tofu"), []byte(fake), 0700); err != nil {
+				t.Fatal(err)
+			}
+			calls := filepath.Join(dir, "calls")
+			prefix := filepath.Join(dir, "report")
+			cmd := exec.Command("bash", script, "direct", "preview", prefix, "environments/prod.tfvars", "false")
+			cmd.Dir = dir
+			cmd.Env = append(os.Environ(), "PATH="+dir+string(os.PathListSeparator)+os.Getenv("PATH"),
+				"CALLS="+calls, "APPLY_CODE="+code, "GITHUB_STEP_SUMMARY="+filepath.Join(dir, "summary"))
+			out, err := cmd.CombinedOutput()
+			if (err != nil) != (code != "0") {
+				t.Fatalf("direct apply error=%v: %s", err, out)
+			}
+			commands, err := os.ReadFile(calls)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := "init -input=false -no-color\nvalidate -no-color\napply -input=false -no-color -auto-approve -var-file=environments/prod.tfvars\n"
+			if string(commands) != want {
+				t.Fatalf("must apply directly without plan/show: %s", commands)
+			}
+			md, err := os.ReadFile(prefix + ".md")
+			if err != nil {
+				t.Fatal(err)
+			}
+			result := "Apply succeeded"
+			if code != "0" {
+				result = "Apply failed"
+			}
+			if !strings.Contains(string(md), result) || !strings.Contains(string(md), "Direct apply output") {
+				t.Fatalf("missing direct apply result: %s", md)
 			}
 		})
 	}

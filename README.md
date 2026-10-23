@@ -486,15 +486,19 @@ When `deployment_var_file` is set, it is read from the selected infrastructure c
 loading state and passed to `tofu plan`. Its `environment` must match the manual
 GitHub environment; preview state still uses its isolated `pr<number>` name.
 
-Combined API deployments reuse `tofu-plan`, `tofu-apply` and `pr-comment` for
-the same action-count tables, grouped details, job summaries and updatable
-per-stack PR comments as the general OpenTofu workflow. Apply results and
-state-save status are appended to the API comment. Partial applies still save
+Combined PR API deployments use direct `tofu apply -auto-approve` after init and
+validation, without a separate plan step. `tofu-apply` and `pr-comment` publish
+apply logs/results and updatable per-stack PR comments; there is no pre-apply
+action-count report. Production retains `tofu-plan` and saved-plan apply.
+Apply results and state-save status appear in the API comment. Partial applies still save
 state before releasing the deployment lock.
 Controller-driven database lifecycles can reuse
-`.github/actions/tofu-plan/lifecycle.sh` with `plan` and `apply` phases. The
+`.github/actions/tofu-plan/lifecycle.sh` with `plan`, `apply` and `direct` phases. The
 script uses the existing `summary.sh`, `log.sh` and `changes.jq`, supports a
-var-file and destroy plan, and applies only the saved `lifecycle.tfplan`.
+var-file and destroy plan. The `apply` phase uses the saved `lifecycle.tfplan`;
+`direct` initializes/validates and applies with `-auto-approve`, with no separate
+plan. Database PR preparation uses `direct`; production and cleanup retain
+`plan` followed by `apply`.
 The controller remains responsible for state persistence, locks and publishing
 the generated per-stack Markdown with `pr-comment`. Temporary raw JSON and
 text inputs are private and removed when each phase finishes.

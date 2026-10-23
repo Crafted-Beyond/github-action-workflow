@@ -259,6 +259,7 @@ jobs:
           printf 'TOFU_SOURCE_SHA=%s\n' "$source_sha" >> "$GITHUB_ENV"
 
       - name: Plan the exact image deployment
+        if: steps.deployment.outputs.preview != 'true'
         id: plan
         uses: Crafted-Beyond/github-action-workflow/.github/actions/tofu-plan@main
         env:
@@ -269,14 +270,17 @@ jobs:
           var_file: ${{ inputs.deployment_var_file }}
           title: ${{ steps.deployment.outputs.state_path }}
 
-      - name: Update API Terraform plan PR comment
-        if: ${{ !cancelled() && steps.deployment.outputs.preview == 'true' && steps.plan.outputs.summary_file != '' }}
-        uses: Crafted-Beyond/github-action-workflow/.github/actions/pr-comment@main
-        with:
-          token: ${{ secrets.GH_TOKEN }}
-          pr_number: ${{ github.event.issue.number }}
-          body_file: ${{ steps.plan.outputs.summary_file }}
-          marker: tofu-plan:${{ steps.deployment.outputs.state_path }}
+      - name: Initialize PR deployment configuration
+        if: steps.deployment.outputs.preview == 'true'
+        working-directory: ${{ steps.deployment.outputs.working_directory }}
+        env:
+          GIT_CONFIG_GLOBAL: ${{ runner.temp }}/combine-gitconfig
+          GIT_TERMINAL_PROMPT: "0"
+        shell: bash
+        run: |
+          set -euo pipefail
+          tofu init -input=false -no-color
+          tofu validate -no-color
 
       - name: Apply deployment prerequisites and Argo CD Application
         id: apply
@@ -284,6 +288,8 @@ jobs:
         with:
           working_directory: ${{ steps.deployment.outputs.working_directory }}
           title: ${{ steps.deployment.outputs.state_path }}
+          direct: ${{ steps.deployment.outputs.preview == 'true' }}
+          var_file: ${{ inputs.deployment_var_file }}
 
       - name: Persist state even after a partial apply
         id: state
@@ -308,12 +314,10 @@ jobs:
         if: ${{ !cancelled() && steps.deployment.outputs.preview == 'true' && (steps.apply.outcome == 'success' || steps.apply.outcome == 'failure') }}
         shell: bash
         env:
-          SUMMARY_FILE: ${{ steps.plan.outputs.summary_file }}
           STATE_SAVED: ${{ steps.state.outcome == 'success' }}
         run: |
           set -euo pipefail
-          cat "$RUNNER_TEMP/tofu-apply.md" >> "$SUMMARY_FILE"
-          printf '\nBackend state saved: **%s**.\n' "$STATE_SAVED" >> "$SUMMARY_FILE"
+          printf '\nBackend state saved: **%s**.\n' "$STATE_SAVED" >> "$RUNNER_TEMP/tofu-apply.md"
 
       - name: Update API Terraform apply PR comment
         if: ${{ !cancelled() && steps.deployment.outputs.preview == 'true' && (steps.apply.outcome == 'success' || steps.apply.outcome == 'failure') }}
@@ -321,7 +325,7 @@ jobs:
         with:
           token: ${{ secrets.GH_TOKEN }}
           pr_number: ${{ github.event.issue.number }}
-          body_file: ${{ steps.plan.outputs.summary_file }}
+          body_file: ${{ runner.temp }}/tofu-apply.md
           marker: tofu-plan:${{ steps.deployment.outputs.state_path }}
 
       - name: Wait for Argo CD health

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Shared reporting for controller-driven saved-plan lifecycles.
-# Usage: lifecycle.sh <plan|apply> <title> <report-prefix> <var-file|empty> <true|false>
+# Usage: lifecycle.sh <plan|apply|direct> <title> <report-prefix> <var-file|empty> <true|false>
 set -euo pipefail
 
 phase=$1
@@ -50,9 +50,20 @@ case "$phase" in
     cat "$md" >> "$GITHUB_STEP_SUMMARY"
     exit 1
     ;;
-  apply)
+  apply|direct)
     rc=0
-    run tofu apply -input=false -no-color lifecycle.tfplan || rc=$?
+    args=(-input=false -no-color)
+    if [ "$phase" = direct ]; then
+      : > "$md"
+      run tofu init -input=false -no-color || rc=$?
+      if [ "$rc" -eq 0 ]; then run tofu validate -no-color || rc=$?; fi
+      args+=(-auto-approve)
+      if [ -n "$var_file" ]; then args+=("-var-file=$var_file"); fi
+      if [ "$destroy" = true ]; then args+=(-destroy); fi
+    else
+      args+=(lifecycle.tfplan)
+    fi
+    if [ "$rc" -eq 0 ]; then run tofu apply "${args[@]}" || rc=$?; fi
     {
       printf '\n## OpenTofu apply: `%s`\n\n' "$title"
       if [ "$rc" -eq 0 ]; then
