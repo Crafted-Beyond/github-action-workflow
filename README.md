@@ -2,6 +2,31 @@
 
 GitHub Actions workflow repository.
 
+## Application-only preview cleanup
+
+`.github/workflows/preview-cleanup.yml` is the reusable counterpart to combine
+for applications without a database lifecycle, such as the separate WireGuard UI.
+Call it after combine on same-repository `pull_request: closed` events (merged
+or abandoned), using `always()` so a failed release build does not strand an
+existing preview. Required inputs are `image`, `state_repository` and
+`infrastructure_directory`; `deployment_var_file`, `state_ref`, `release_branch`
+and `tofu_version` follow the combine conventions. Secrets are `GH_TOKEN`,
+`registry_username`, `registry_password`, `kubeconfig` and `chart_repository_url`.
+The current cleanup workflow supports the standard Docker Hub caller.
+
+It checks the current closed PR and immutable head, uses its PR infrastructure
+revision and `combine/<owner>/<repo>/pr<number>` state, and shares combine's
+publication concurrency group and backend lock. It verifies preview namespace
+ownership, runs the shared plan action with `destroy: "true"`, applies that saved
+plan and persists state even after partial removal. Missing state with a live
+namespace, foreign ownership, partial state without ownership outputs and held
+locks fail explicitly for recovery. It does not delete another application's
+API or database. Database-owning callers should continue using database cleanup.
+
+Closing the PR authorizes removal of that temporary preview; it never targets
+the actual environment. No cluster or backend deletion occurs merely by adding
+this workflow. Publish the shared changes before activating caller references.
+
 ## Installing shared application secrets
 
 Secret management lives in the same `github-terraform-resource/infra/main.tf`
@@ -37,6 +62,8 @@ In `github-terraform-resource/infra/main.tf`, add `secret = true` inside each
 desired `sub_repos` entry. It defaults to false; `wireguard-api` is enabled.
 Do not enable it on the source `github-terraform-resource` repository.
 With `secret = true` and no explicit list, only `GH_TOKEN` is copied.
+The separate `wireguard-ui` is enabled for `GH_TOKEN`, `DOCKERHUB_TOKEN` and
+`KUBECONFIG` only; no database/admin credentials are copied to the UI.
 Use `dedicated_secrets = ["GH_TOKEN", "DOCKERHUB_TOKEN", "KUBECONFIG", "APPLICATION_SECRETS"]`
 to copy exactly those names. `secret = false` disables copying.
 The infrastructure caller explicitly passes source values as a JSON

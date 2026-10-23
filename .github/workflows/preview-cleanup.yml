@@ -1,0 +1,209 @@
+name: CraftedBeyond preview cleanup
+
+on:
+  workflow_call:
+    inputs:
+      image:
+        type: string
+        required: true
+      state_repository:
+        type: string
+        required: true
+      state_ref:
+        type: string
+        default: main
+      release_branch:
+        type: string
+        default: main
+      infrastructure_directory:
+        type: string
+        required: true
+      deployment_var_file:
+        type: string
+        default: ""
+      tofu_version:
+        type: string
+        default: latest
+    secrets:
+      GH_TOKEN:
+        required: true
+      registry_username:
+        required: true
+      registry_password:
+        required: true
+      kubeconfig:
+        required: true
+      chart_repository_url:
+        required: true
+
+permissions: {}
+
+jobs:
+  cleanup:
+    if: >-
+      github.event_name == 'pull_request' && github.event.action == 'closed' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: preview
+    concurrency:
+      group: combine-publication-${{ github.repository }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ secrets.GH_TOKEN }}
+      IMAGE_REGISTRY: docker.io
+      IMAGE_REPOSITORY: ${{ inputs.image }}
+      REGISTRY_ADAPTER: dockerhub
+      REGISTRY_USERNAME: ${{ secrets.registry_username }}
+      REGISTRY_PASSWORD: ${{ secrets.registry_password }}
+      RELEASE_BRANCH: ${{ inputs.release_branch }}
+      STATE_REPOSITORY: ${{ inputs.state_repository }}
+      STATE_REF: ${{ inputs.state_ref }}
+      INFRASTRUCTURE_DIRECTORY: ${{ inputs.infrastructure_directory }}
+      TF_VAR_registry_username: ${{ secrets.registry_username }}
+      TF_VAR_registry_password: ${{ secrets.registry_password }}
+      TF_VAR_github_token: ${{ secrets.GH_TOKEN }}
+      TF_VAR_chart_repository_url: ${{ secrets.chart_repository_url }}
+      TF_IN_AUTOMATION: "true"
+    steps:
+      - name: Checkout closed PR infrastructure
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          token: ${{ secrets.GH_TOKEN }}
+          path: infrastructure
+          persist-credentials: false
+
+      - name: Authorize preview cleanup
+        id: identity
+        uses: Crafted-Beyond/github-action-workflow/.github/actions/docker-release@main
+        with:
+          operation: preview-cleanup-prepare
+
+      - name: Lock the preview backend
+        id: lock
+        uses: Crafted-Beyond/github-action-workflow/.github/actions/docker-release@main
+        env:
+          STATE_PATH: ${{ steps.identity.outputs.state_path }}
+        with:
+          operation: preview-cleanup-lock
+
+      - name: Load saved preview state
+        id: state_pull
+        uses: Crafted-Beyond/github-action-workflow/.github/actions/state-pull@main
+        with:
+          repository: ${{ inputs.state_repository }}
+          token: ${{ secrets.GH_TOKEN }}
+          ref: ${{ inputs.state_ref }}
+          state_path: ${{ steps.identity.outputs.state_path }}
+          working_directory: ${{ steps.identity.outputs.working_directory }}
+          checkout_path: .combine-state
+
+      - name: Install kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: v1.34.0
+
+      - name: Prepare credentials
+        shell: bash
+        env:
+          CLUSTER_CONFIG: ${{ secrets.kubeconfig }}
+          WORKDIR: ${{ steps.identity.outputs.working_directory }}
+        run: |
+          set -euo pipefail
+          umask 077
+          export KUBECONFIG="$RUNNER_TEMP/combine-kubeconfig"
+          printf '%s\n' "$CLUSTER_CONFIG" > "$KUBECONFIG"
+          printf 'KUBECONFIG=%s\nTF_VAR_kubeconfig_path=%s\n' "$KUBECONFIG" "$KUBECONFIG" >> "$GITHUB_ENV"
+          cp "$RUNNER_TEMP/combine.auto.tfvars.json" "$WORKDIR/combine.auto.tfvars.json"
+          export GIT_CONFIG_GLOBAL="$RUNNER_TEMP/combine-gitconfig"
+          git config --file "$GIT_CONFIG_GLOBAL" "http.${GITHUB_SERVER_URL}/.extraheader" \
+            "AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w 0)"
+
+      - name: Refuse orphaned or foreign previews
+        shell: bash
+        env:
+          NAME: ${{ steps.identity.outputs.name }}
+          STATE_EXISTS: ${{ steps.state_pull.outputs.state_exists }}
+          WORKDIR: ${{ steps.identity.outputs.working_directory }}
+        run: |
+          set -euo pipefail
+          namespace=$(kubectl --request-timeout=30s get namespace "$NAME" --ignore-not-found -o json)
+          argo_count=$(kubectl --request-timeout=30s get applications.argoproj.io,appprojects.argoproj.io \
+            --all-namespaces -o json | jq --arg name "$NAME" '[.items[] | select(.metadata.name == $name)] | length')
+          if [ -n "$namespace" ]; then
+            printf '%s' "$namespace" | jq -e --arg env "pr${{ github.event.pull_request.number }}" \
+              '.metadata.labels["app.kubernetes.io/managed-by"] == "combine-workflow" and
+               .metadata.labels["craftedbeyond.com/environment"] == $env' >/dev/null
+          fi
+          if [ -n "$namespace" ] || [ "$argo_count" -gt 0 ]; then
+            test "$STATE_EXISTS" = true || { echo "::error::Preview resources exist without saved state; recover/import before cleanup."; exit 1; }
+            jq -e '[.resources[]? | select(.mode == "managed") | .instances[]?] | length > 0' \
+              "$WORKDIR/terraform.tfstate" >/dev/null || {
+                echo "::error::Preview resources exist but saved state is empty; recover/import before cleanup."
+                exit 1
+              }
+          fi
+
+      - name: Verify saved ownership
+        if: steps.state_pull.outputs.state_exists == 'true'
+        uses: Crafted-Beyond/github-action-workflow/.github/actions/docker-release@main
+        with:
+          operation: preview-cleanup-verify
+
+      - name: Install OpenTofu
+        if: steps.state_pull.outputs.state_exists == 'true'
+        uses: Crafted-Beyond/github-action-workflow/.github/actions/setup-tofu@main
+        with:
+          tofu_version: ${{ inputs.tofu_version }}
+
+      - name: Plan preview removal
+        if: steps.state_pull.outputs.state_exists == 'true'
+        uses: Crafted-Beyond/github-action-workflow/.github/actions/tofu-plan@main
+        env:
+          GIT_CONFIG_GLOBAL: ${{ runner.temp }}/combine-gitconfig
+          GIT_TERMINAL_PROMPT: "0"
+          TOFU_SOURCE_SHA: ${{ github.event.pull_request.head.sha }}
+        with:
+          working_directory: ${{ steps.identity.outputs.working_directory }}
+          var_file: ${{ inputs.deployment_var_file }}
+          title: ${{ steps.identity.outputs.state_path }}
+          destroy: "true"
+
+      - name: Apply saved removal plan
+        id: apply
+        if: steps.state_pull.outputs.state_exists == 'true'
+        uses: Crafted-Beyond/github-action-workflow/.github/actions/tofu-apply@main
+        with:
+          working_directory: ${{ steps.identity.outputs.working_directory }}
+          title: ${{ steps.identity.outputs.state_path }}
+
+      - name: Save state after complete or partial removal
+        id: state
+        if: ${{ always() && (steps.apply.outcome == 'success' || steps.apply.outcome == 'failure') }}
+        uses: Crafted-Beyond/github-action-workflow/.github/actions/state-push@main
+        with:
+          state_path: ${{ steps.identity.outputs.state_path }}
+          ref: ${{ inputs.state_ref }}
+          working_directory: ${{ steps.identity.outputs.working_directory }}
+          checkout_path: .combine-state
+
+      - name: Release preview lock
+        if: ${{ always() && steps.lock.outcome == 'success' }}
+        uses: Crafted-Beyond/github-action-workflow/.github/actions/docker-release@main
+        env:
+          STATE_PATH: ${{ steps.identity.outputs.state_path }}
+          STATE_SAFE: ${{ (steps.apply.outcome != 'success' && steps.apply.outcome != 'failure') || steps.state.outcome == 'success' }}
+        with:
+          operation: unlock
+
+      - name: Remove runner credentials
+        if: always()
+        uses: Crafted-Beyond/github-action-workflow/.github/actions/docker-release@main
+        env:
+          PRESERVE_DEPLOYMENT_STATE: ${{ steps.state.outcome == 'failure' }}
+        with:
+          operation: deployment-cleanup

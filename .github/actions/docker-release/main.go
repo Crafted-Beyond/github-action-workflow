@@ -1637,6 +1637,25 @@ func run() error {
 		return c.deploymentPrepare()
 	case "deployment-lock":
 		return c.deploymentLock()
+	case "preview-cleanup-prepare":
+		return c.previewCleanupPrepare()
+	case "preview-cleanup-lock":
+		if err := c.validateCleanupPR(); err != nil {
+			return err
+		}
+		if os.Getenv("STATE_PATH") != fmt.Sprintf("combine/%s/pr%d", c.event.Repository.FullName, c.event.PullRequest.Number) {
+			return errors.New("cleanup state path does not match the closed PR")
+		}
+		legacy, err := c.ref(c.lockName())
+		if err != nil {
+			return err
+		}
+		if legacy != nil {
+			return errors.New("legacy publication lock exists; reconcile its owning run before preview cleanup")
+		}
+		return c.backendAcquire()
+	case "preview-cleanup-verify":
+		return c.previewCleanupVerify()
 	case "deployment-complete":
 		return c.deploymentComplete()
 	case "report":
