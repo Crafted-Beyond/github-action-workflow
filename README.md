@@ -486,10 +486,9 @@ When `deployment_var_file` is set, it is read from the selected infrastructure c
 loading state and passed to `tofu plan`. Its `environment` must match the manual
 GitHub environment; preview state still uses its isolated `pr<number>` name.
 
-Combined PR API deployments use direct `tofu apply -auto-approve` after init and
-validation, without a separate plan step. `tofu-apply` and `pr-comment` publish
-apply logs/results and updatable per-stack PR comments; there is no pre-apply
-action-count report. Production retains `tofu-plan` and saved-plan apply.
+Combined PR and actual API deployments use `tofu-plan` followed by saved-plan
+`tofu-apply`. Action-count tables, expandable details and apply results appear
+in job summaries and updatable per-stack PR comments.
 Apply results and state-save status appear in the API comment. Partial applies still save
 state before releasing the deployment lock.
 Controller-driven database lifecycles can reuse
@@ -497,8 +496,8 @@ Controller-driven database lifecycles can reuse
 script uses the existing `summary.sh`, `log.sh` and `changes.jq`, supports a
 var-file and destroy plan. The `apply` phase uses the saved `lifecycle.tfplan`;
 `direct` initializes/validates and applies with `-auto-approve`, with no separate
-plan. Database PR preparation uses `direct`; production and cleanup retain
-`plan` followed by `apply`.
+plan. Database PR preparation, production and cleanup all use
+`plan` followed by `apply`; `direct` remains an optional helper, not the workflow default.
 The controller remains responsible for state persistence, locks and publishing
 the generated per-stack Markdown with `pr-comment`. Temporary raw JSON and
 text inputs are private and removed when each phase finishes.
@@ -638,8 +637,9 @@ to the shared combine workflow. PR Terraform/schema comes from that authorized
 commit; controller code always comes from this shared action. Pin the workflow
 and its internal actions consistently when adopting an immutable shared release.
 
-PR preparation uses direct apply, while actual deployments and merge cleanup
-use plan followed by saved-plan apply. Database reuse skips infrastructure
+PR preparation, actual deployments and merge cleanup all use plan followed by
+saved-plan apply. Database readiness waits log progress every 30 seconds.
+Database reuse skips infrastructure
 apply. PRs default to read-only access to the application's permanent database,
 or to an isolated temporary database if no permanent server exists.
 `pr_database_access: write` always requires an isolated PR server;

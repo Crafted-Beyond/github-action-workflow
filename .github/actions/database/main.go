@@ -238,14 +238,10 @@ func (l lifecycle) terraform(directory, path string, destroy bool) error {
 		}
 		return nil
 	}
-	phase := "direct"
-	if l.pr == 0 || destroy {
-		if err := runPhase("plan"); err != nil {
-			return err
-		}
-		phase = "apply"
+	if err := runPhase("plan"); err != nil {
+		return err
 	}
-	applyErr := runPhase(phase)
+	applyErr := runPhase("apply")
 	workingState := filepath.Join(directory, "terraform.tfstate")
 	if err := copyFile(workingState, state); err != nil {
 		return fmt.Errorf("state missing after apply; retaining backend lock: %w", err)
@@ -382,6 +378,7 @@ SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = %s;
 }
 
 func (l lifecycle) waitDatabaseApplication(name string) error {
+	fmt.Printf("Waiting for database Argo Application %s to reconcile and become healthy (up to 10 minutes).\n", name)
 	start := time.Now().UTC().Truncate(time.Second)
 	if _, err := command("", "", "kubectl", "-n", "argocd", "annotate", "application", name,
 		"argocd.argoproj.io/refresh=hard", "--overwrite"); err != nil {
@@ -416,6 +413,11 @@ func (l lifecycle) waitDatabaseApplication(name string) error {
 			app.Status.Health.Status == "Healthy" && reflect.DeepEqual(app.Spec.Source, app.Status.Sync.ComparedTo.Source) {
 			_, err := command("", "", "kubectl", "-n", name, "rollout", "status", "statefulset/"+l.config.workload, "--timeout=60s")
 			return err
+		}
+		if attempt%6 == 0 {
+			fmt.Printf("Database %s readiness: sync=%s, health=%s, reconciled=%s (elapsed %s).\n",
+				name, app.Status.Sync.Status, app.Status.Health.Status, app.Status.ReconciledAt.Format(time.RFC3339),
+				time.Since(start).Truncate(time.Second))
 		}
 		time.Sleep(5 * time.Second)
 	}

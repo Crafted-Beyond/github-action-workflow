@@ -13,7 +13,7 @@ func TestTerraformReportingPreservesState(t *testing.T) {
 		pr              int
 		destroy         bool
 	}{
-		{"PR direct success", "0", 1, false},
+		{"PR saved plan success", "0", 1, false},
 		{"PR partial apply", "1", 1, false},
 		{"production saved plan success", "0", 0, false},
 		{"production partial apply", "1", 0, false},
@@ -68,10 +68,7 @@ fi
 			if (err != nil) != (tc.applyCode != "0") {
 				t.Fatalf("apply code %s: %v", tc.applyCode, err)
 			}
-			phase := "direct"
-			if tc.pr == 0 || tc.destroy {
-				phase = "apply"
-			}
+			phase := "apply"
 			if err != nil && !strings.Contains(err.Error(), "Terraform "+phase+" failed") {
 				t.Fatal(err)
 			}
@@ -92,7 +89,7 @@ fi
 				t.Fatalf("state commit missing: %s, %v", log, err)
 			}
 			if !strings.Contains(string(log), "\n"+phase+"\n") ||
-				strings.Contains(string(log), "\nplan\n") != (phase == "apply") {
+				!strings.Contains(string(log), "\nplan\n") || strings.Contains(string(log), "\ndirect\n") {
 				t.Fatalf("incorrect PR/production/cleanup execution phases: %s", log)
 			}
 		})
