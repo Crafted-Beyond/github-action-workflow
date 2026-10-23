@@ -23,8 +23,9 @@ header() {
 }
 
 footer() {
+  local sha=${TOFU_SOURCE_SHA:-$GITHUB_SHA}
   printf '<sub>Commit `%s` · [workflow run](%s/%s/actions/runs/%s)</sub>\n' \
-    "${GITHUB_SHA:0:7}" "${GITHUB_SERVER_URL:-https://github.com}" "${GITHUB_REPOSITORY:-}" "${GITHUB_RUN_ID:-}"
+    "${sha:0:7}" "${GITHUB_SERVER_URL:-https://github.com}" "${GITHUB_REPOSITORY:-}" "${GITHUB_RUN_ID:-}"
 }
 
 if [ "$status" != ok ]; then

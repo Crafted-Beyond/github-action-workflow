@@ -245,7 +245,7 @@ jobs:
           working_directory: ${{ steps.deployment.outputs.working_directory }}
           checkout_path: .combine-state
 
-      - name: Initialize and validate deployment configuration
+      - name: Configure authenticated Terraform module downloads
         working-directory: ${{ steps.deployment.outputs.working_directory }}
         shell: bash
         run: |
@@ -255,25 +255,35 @@ jobs:
           git config --file "$GIT_CONFIG_GLOBAL" "http.${GITHUB_SERVER_URL}/.extraheader" \
             "AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w 0)"
           export GIT_TERMINAL_PROMPT=0
-          tofu init -input=false -no-color
-          tofu validate -no-color
+          source_sha=$(git -C "$GITHUB_WORKSPACE/infrastructure" rev-parse HEAD)
+          printf 'TOFU_SOURCE_SHA=%s\n' "$source_sha" >> "$GITHUB_ENV"
 
       - name: Plan the exact image deployment
-        working-directory: ${{ steps.deployment.outputs.working_directory }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          args=()
-          if [[ -n "$DEPLOYMENT_VAR_FILE" ]]; then
-            args+=("-var-file=$DEPLOYMENT_VAR_FILE")
-          fi
-          tofu plan -input=false -no-color -out=tfplan "${args[@]}"
+        id: plan
+        uses: Crafted-Beyond/github-action-workflow/.github/actions/tofu-plan@main
+        env:
+          GIT_CONFIG_GLOBAL: ${{ runner.temp }}/combine-gitconfig
+          GIT_TERMINAL_PROMPT: "0"
+        with:
+          working_directory: ${{ steps.deployment.outputs.working_directory }}
+          var_file: ${{ inputs.deployment_var_file }}
+          title: ${{ steps.deployment.outputs.state_path }}
+
+      - name: Update API Terraform plan PR comment
+        if: ${{ !cancelled() && steps.deployment.outputs.preview == 'true' && steps.plan.outputs.summary_file != '' }}
+        uses: Crafted-Beyond/github-action-workflow/.github/actions/pr-comment@main
+        with:
+          token: ${{ secrets.GH_TOKEN }}
+          pr_number: ${{ github.event.issue.number }}
+          body_file: ${{ steps.plan.outputs.summary_file }}
+          marker: tofu-plan:${{ steps.deployment.outputs.state_path }}
 
       - name: Apply deployment prerequisites and Argo CD Application
         id: apply
-        working-directory: ${{ steps.deployment.outputs.working_directory }}
-        shell: bash
-        run: tofu apply -input=false -no-color tfplan
+        uses: Crafted-Beyond/github-action-workflow/.github/actions/tofu-apply@main
+        with:
+          working_directory: ${{ steps.deployment.outputs.working_directory }}
+          title: ${{ steps.deployment.outputs.state_path }}
 
       - name: Persist state even after a partial apply
         id: state
@@ -293,6 +303,26 @@ jobs:
           BUILD_TAG: ${{ steps.deployment.outputs.tag }}
         with:
           operation: deployment-outputs
+
+      - name: Append API apply result to the PR report
+        if: ${{ !cancelled() && steps.deployment.outputs.preview == 'true' && (steps.apply.outcome == 'success' || steps.apply.outcome == 'failure') }}
+        shell: bash
+        env:
+          SUMMARY_FILE: ${{ steps.plan.outputs.summary_file }}
+          STATE_SAVED: ${{ steps.state.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          cat "$RUNNER_TEMP/tofu-apply.md" >> "$SUMMARY_FILE"
+          printf '\nBackend state saved: **%s**.\n' "$STATE_SAVED" >> "$SUMMARY_FILE"
+
+      - name: Update API Terraform apply PR comment
+        if: ${{ !cancelled() && steps.deployment.outputs.preview == 'true' && (steps.apply.outcome == 'success' || steps.apply.outcome == 'failure') }}
+        uses: Crafted-Beyond/github-action-workflow/.github/actions/pr-comment@main
+        with:
+          token: ${{ secrets.GH_TOKEN }}
+          pr_number: ${{ github.event.issue.number }}
+          body_file: ${{ steps.plan.outputs.summary_file }}
+          marker: tofu-plan:${{ steps.deployment.outputs.state_path }}
 
       - name: Wait for Argo CD health
         id: healthy

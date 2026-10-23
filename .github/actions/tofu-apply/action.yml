@@ -58,8 +58,9 @@ runs:
               printf '<details>\n<summary>📤 Outputs</summary>\n\n````text\n%s\n````\n\n</details>\n\n' "$outputs"
             fi
           fi
+          source_sha=${TOFU_SOURCE_SHA:-$GITHUB_SHA}
           printf '<sub>Commit `%s` · [workflow run](%s/%s/actions/runs/%s)</sub>\n' \
-            "${GITHUB_SHA:0:7}" "${GITHUB_SERVER_URL:-https://github.com}" "${GITHUB_REPOSITORY:-}" "${GITHUB_RUN_ID:-}"
+            "${source_sha:0:7}" "${GITHUB_SERVER_URL:-https://github.com}" "${GITHUB_REPOSITORY:-}" "${GITHUB_RUN_ID:-}"
         } > "$md"
         cat "$md" >> "$GITHUB_STEP_SUMMARY"
 
