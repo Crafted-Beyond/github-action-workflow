@@ -375,9 +375,23 @@ Application-owned Terraform roots are also supported: set
 `infrastructure_repository` to the application repository,
 `infrastructure_ref: main` and `infrastructure_directory: infra`. That root calls
 the shared combine module through its Git source. `GH_TOKEN` authenticates module
-downloads through a temporary Git configuration removed during cleanup. Preview
-runs still use protected `main`, never the PR's Terraform code. WireGuard API uses
-this application-owned layout.
+downloads through a temporary Git configuration removed during cleanup.
+When `infrastructure_repository` equals the calling repository, previews
+automatically check out the exact published image SHA for Terraform and its
+var-file, ignoring `infrastructure_ref` for that preview only. Actual deployments
+and separate infrastructure repositories retain the configured ref. WireGuard API
+uses this application-owned layout with `infrastructure_directory: infra/api`.
+Only authorize trusted PRs: PR Terraform executes with cluster, registry and
+backend credentials. Orchestration actions and authorization remain on protected
+branches; a PR-supplied controller is not executed.
+
+Callers with prerequisite provisioning can pass `preview_sha`, the authorized
+immutable PR SHA used by that job. The image controller rejects a changed PR head
+before publication, preventing database infrastructure from one revision being
+combined with an image/API from another. Leave it empty for image-only or release
+operations. The `issue_comment` caller itself must first be bootstrapped on the
+default branch, but application infrastructure changes need not be merged to
+preview them.
 
 ### Three separate operations
 
@@ -459,7 +473,8 @@ images from cleanup. Label removal alone does not trigger cleanup.
 | `state_repository` / `state_ref` | Existing **private** Git repository/branch for state |
 | `deploy_runs_on` | Runner as JSON; default `"ubuntu-latest"` |
 | `kubectl_version` | Installed kubectl version; default `v1.34.0`, must be within one minor of K3s |
-| `infrastructure_repository` / `infrastructure_ref` | Trusted deployment code; default CraftedBeyond Terraform repository at `main` |
+| `infrastructure_repository` / `infrastructure_ref` | Infrastructure source; same-repository previews use the image SHA, otherwise the configured ref (default shared Terraform repository at `main`) |
+| `preview_sha` | Optional authorized prerequisite PR commit; fail if the PR head changed before image preparation |
 | `infrastructure_directory` | Central Terraform application root; default `applications/<calling-repository-name>` |
 | `deployment_var_file` | Optional relative HCL `.tfvars` or JSON `.tfvars.json` path in that root, for example `environments/prod.tfvars`; supplies the actual environment and Terraform application settings |
 | `environment` / `tag` | Explicit workflow_dispatch target and optional version |
@@ -467,7 +482,7 @@ images from cleanup. Label removal alone does not trigger cleanup.
 
 Docker inputs (`registry`, adapter, context, Dockerfile, platforms) retain their
 existing behavior. Use `build_runs_on` for build-runner labels.
-When `deployment_var_file` is set, it is read from the trusted checkout before
+When `deployment_var_file` is set, it is read from the selected infrastructure checkout before
 loading state and passed to `tofu plan`. Its `environment` must match the manual
 GitHub environment; preview state still uses its isolated `pr<number>` name.
 

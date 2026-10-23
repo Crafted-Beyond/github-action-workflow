@@ -39,19 +39,23 @@ on:
         type: string
         default: v1.34.0
       infrastructure_repository:
-        description: Trusted repository containing the Terraform root; may be the application repository.
+        description: Repository containing Terraform; same-repository previews use the captured PR commit.
         type: string
         default: Crafted-Beyond/crb-craftedbeyond-k3s-terraform
       infrastructure_ref:
-        description: Trusted infrastructure revision, never PR-controlled code.
+        description: Infrastructure revision for actual deployments or a separate infrastructure repository; same-repository previews use the image SHA.
         type: string
         default: main
       infrastructure_directory:
-        description: Terraform root in the trusted repository, for example infra; defaults to applications/<calling-repository-name>.
+        description: Terraform root in the selected repository; defaults to applications/<calling-repository-name>.
         type: string
         default: ""
       deployment_var_file:
         description: Optional relative .tfvars or .tfvars.json path in the Terraform root; environment comes from this file and must match the selected GitHub environment.
+        type: string
+        default: ""
+      preview_sha:
+        description: Optional authorized PR SHA captured by prerequisite jobs; reject a changed PR head before building.
         type: string
         default: ""
       state_repository:
@@ -115,6 +119,7 @@ jobs:
       platforms: ${{ inputs.platforms }}
       runs_on: ${{ inputs.build_runs_on }}
       allow_preview: true
+      preview_sha: ${{ inputs.preview_sha }}
     secrets:
       GH_TOKEN: ${{ secrets.GH_TOKEN }}
       registry_username: ${{ secrets.registry_username }}
@@ -178,11 +183,11 @@ jobs:
           path: registry-control
           persist-credentials: false
 
-      - name: Checkout trusted deployment infrastructure
+      - name: Checkout deployment infrastructure at the selected source revision
         uses: actions/checkout@v4
         with:
           repository: ${{ inputs.infrastructure_repository }}
-          ref: ${{ inputs.infrastructure_ref }}
+          ref: ${{ needs.image.outputs.preview == 'true' && inputs.infrastructure_repository == github.repository && needs.image.outputs.sha || inputs.infrastructure_ref }}
           token: ${{ secrets.GH_TOKEN }}
           path: infrastructure
           persist-credentials: false
@@ -206,7 +211,7 @@ jobs:
           export KUBECONFIG="$RUNNER_TEMP/combine-kubeconfig"
           printf 'KUBECONFIG=%s\nTF_VAR_kubeconfig_path=%s\n' "$KUBECONFIG" "$KUBECONFIG" >> "$GITHUB_ENV"
           printf '%s\n' "$CLUSTER_CONFIG" > "$KUBECONFIG"
-          test -d "$WORKDIR" || { echo "::error::Create the application's Terraform root in the central infrastructure repository."; exit 1; }
+          test -d "$WORKDIR" || { echo "::error::The selected infrastructure revision does not contain the configured Terraform root."; exit 1; }
           cp "$RUNNER_TEMP/combine.auto.tfvars.json" "$WORKDIR/combine.auto.tfvars.json"
 
       - name: Verify Kubernetes API connectivity

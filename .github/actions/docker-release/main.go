@@ -618,6 +618,16 @@ func (c *controller) version(pr pullRequest, label string) (string, string, bool
 	return next, "", false, err
 }
 
+func validatePreviewSource(expected, actual string, preview bool) error {
+	if expected == "" {
+		return nil
+	}
+	if !preview || !shaPattern.MatchString(expected) || expected != actual {
+		return errors.New("PR head differs from the authorized prerequisite commit; post a new /combine-deploy command")
+	}
+	return nil
+}
+
 func (c *controller) prepare() error {
 	for _, key := range []string{"build", "publish"} {
 		if err := output(key, "false"); err != nil {
@@ -679,9 +689,13 @@ func (c *controller) prepare() error {
 		}
 	}
 	sha, mode := pr.Head.SHA, "pr"
+	if err := validatePreviewSource(os.Getenv("EXPECTED_PREVIEW_SHA"), sha, command == "/combine-deploy"); err != nil {
+		return err
+	}
 	if release {
 		sha, mode = pr.MergeCommitSHA, "release"
 	}
+
 	if !shaPattern.MatchString(sha) {
 		return errors.New("invalid source commit SHA")
 	}
