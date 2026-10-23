@@ -35,6 +35,12 @@ the workflow cannot override provider restrictions.
 
 ## Application-only preview cleanup
 
+The database lifecycle configures Git author/committer identity locally in its
+backend checkout, not just on individual commit commands. This lets a rejected
+push rebase over another application's backend commits on fresh hosted runners
+without a global Git identity. Backend locks and state-recovery requirements
+remain unchanged.
+
 `.github/workflows/preview-cleanup.yml` is the reusable counterpart to combine
 for applications without a database lifecycle, such as the separate WireGuard UI.
 Call it after combine on same-repository `pull_request: closed` events (merged

@@ -108,6 +108,14 @@ func writeJSON(path string, value any) error {
 }
 
 func (l lifecycle) commit(message string) error {
+	for _, identity := range [][2]string{
+		{"user.name", "github-actions[bot]"},
+		{"user.email", "41898282+github-actions[bot]@users.noreply.github.com"},
+	} {
+		if _, err := command(l.backend, "", "git", "config", "--local", identity[0], identity[1]); err != nil {
+			return err
+		}
+	}
 	if _, err := command(l.backend, "", "git", "add", "-f", "--", "combine/"+l.repository); err != nil {
 		return err
 	}
