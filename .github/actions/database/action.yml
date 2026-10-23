@@ -3,7 +3,7 @@ description: Prepare independent Argo database infrastructure or clean up a merg
 inputs:
   operation:
     required: true
-    description: prepare or cleanup
+    description: plan (manual read-only), prepare, or cleanup
 outputs:
   sha:
     description: Authorized source commit used for database infrastructure.
@@ -17,7 +17,7 @@ runs:
           cache: false
 
       - name: Authorize and capture database source commit
-        if: inputs.operation == 'prepare'
+        if: inputs.operation == 'prepare' || inputs.operation == 'plan'
         id: resolve
         shell: bash
         env:
@@ -27,7 +27,7 @@ runs:
       - name: Checkout application infrastructure
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.operation == 'prepare' && steps.resolve.outputs.sha || github.sha }}
+          ref: ${{ (inputs.operation == 'prepare' || inputs.operation == 'plan') && steps.resolve.outputs.sha || github.sha }}
           path: source
           token: ${{ env.GH_TOKEN }}
           persist-credentials: false

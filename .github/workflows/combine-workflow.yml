@@ -3,6 +3,10 @@ name: CraftedBeyond combine workflow
 on:
   workflow_call:
     inputs:
+      action:
+        description: Manual deployment action, plan or apply. Apply also creates and applies a saved plan. PR behavior is unchanged.
+        type: string
+        default: apply
       image:
         type: string
         required: true
@@ -131,7 +135,7 @@ jobs:
       registry_password: ${{ secrets.registry_password }}
 
   deploy:
-    name: ${{ github.event_name == 'workflow_dispatch' && format('Deploy {0} - {1}', inputs.environment, inputs.tag || 'latest stable') || format('Combine-deploy preview - {0}', needs.image.outputs.tag) }}
+    name: ${{ github.event_name == 'workflow_dispatch' && format('{0} {1} - {2}', inputs.action, inputs.environment, inputs.tag || 'latest stable') || format('Combine-deploy preview - {0}', needs.image.outputs.tag) }}
     needs: image
     if: >-
       always() && !cancelled() &&
@@ -162,6 +166,7 @@ jobs:
       BUILD_PREVIEW: ${{ needs.image.outputs.preview }}
       DEPLOY_ENVIRONMENT: ${{ inputs.environment }}
       DEPLOY_TAG: ${{ inputs.tag }}
+      DEPLOY_ACTION: ${{ inputs.action }}
       INFRASTRUCTURE_DIRECTORY: ${{ inputs.infrastructure_directory }}
       DEPLOYMENT_VAR_FILE: ${{ inputs.deployment_var_file }}
       STATE_REPOSITORY: ${{ inputs.state_repository }}
@@ -229,6 +234,7 @@ jobs:
           tofu_version: ${{ inputs.tofu_version }}
 
       - name: Serialize deployment and verify selected image
+        if: github.event_name != 'workflow_dispatch' || inputs.action == 'apply'
         id: lock
         uses: Crafted-Beyond/github-action-workflow/.github/actions/docker-release@main
         env:
@@ -238,6 +244,14 @@ jobs:
           BUILD_PREVIEW: ${{ steps.deployment.outputs.preview }}
         with:
           operation: deployment-lock
+
+      - name: Check backend ownership without acquiring a lock
+        if: github.event_name == 'workflow_dispatch' && inputs.action == 'plan'
+        uses: Crafted-Beyond/github-action-workflow/.github/actions/docker-release@main
+        env:
+          STATE_PATH: ${{ steps.deployment.outputs.state_path }}
+        with:
+          operation: deployment-plan-check
 
       - name: Load isolated state
         id: state_pull
@@ -284,6 +298,7 @@ jobs:
           marker: tofu-plan:${{ steps.deployment.outputs.state_path }}
 
       - name: Apply deployment prerequisites and Argo CD Application
+        if: github.event_name != 'workflow_dispatch' || inputs.action == 'apply'
         id: apply
         uses: Crafted-Beyond/github-action-workflow/.github/actions/tofu-apply@main
         with:
@@ -355,7 +370,7 @@ jobs:
           operation: unlock
 
       - name: Report deployment result
-        if: always()
+        if: ${{ always() && (github.event_name != 'workflow_dispatch' || inputs.action != 'plan') }}
         uses: Crafted-Beyond/github-action-workflow/.github/actions/docker-release@main
         env:
           REPORT_BODY: >-
@@ -366,6 +381,16 @@ jobs:
             Preview cleanup, when enabled, is managed by the calling workflow.
         with:
           operation: report
+
+      - name: Report plan-only result
+        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.action == 'plan' }}
+        shell: bash
+        env:
+          PLAN_RESULT: ${{ steps.plan.outcome }}
+        run: |
+          set -euo pipefail
+          printf '\n## Plan-only result: %s\n\nNo apply, backend writes, or Argo deployment was performed. Apply runs a fresh plan; this plan is not reused across runs.\n' \
+            "$PLAN_RESULT" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Clean deployment files
         if: always()

@@ -3,7 +3,7 @@ description: Validate release labels, serialize publications, version Git tags a
 inputs:
   operation:
     required: true
-    description: prepare, preflight, finalize, unlock, build-cleanup, deployment-prepare, deployment-lock, deployment-outputs, deployment-complete, deployment-cleanup, preview-cleanup-prepare, preview-cleanup-lock, preview-cleanup-verify or report.
+    description: prepare, preflight, finalize, unlock, build-cleanup, deployment-prepare, deployment-lock, deployment-plan-check, deployment-outputs, deployment-complete, deployment-cleanup, preview-cleanup-prepare, preview-cleanup-lock, preview-cleanup-verify or report.
 outputs:
   working_directory:
     value: ${{ steps.control.outputs.working_directory }}

@@ -208,6 +208,10 @@ func (l lifecycle) hasResources(path string) (bool, error) {
 }
 
 func (l lifecycle) terraform(directory, path string, destroy bool) error {
+	return l.terraformMode(directory, path, destroy, false)
+}
+
+func (l lifecycle) terraformMode(directory, path string, destroy, planOnly bool) error {
 	if err := l.validateDirectory(directory); err != nil {
 		return err
 	}
@@ -215,8 +219,14 @@ func (l lifecycle) terraform(directory, path string, destroy bool) error {
 	if _, err := os.Stat(script); err != nil {
 		return fmt.Errorf("shared Terraform reporting scripts are required: %w", err)
 	}
-	if err := l.lock(path); err != nil {
-		return err
+	if planOnly {
+		if _, err := l.hasResources(path); err != nil {
+			return err
+		}
+	} else {
+		if err := l.lock(path); err != nil {
+			return err
+		}
 	}
 	fmt.Printf("Using isolated backend state %s/terraform.tfstate.\n", path)
 	state := filepath.Join(l.backend, path, "terraform.tfstate")
@@ -247,6 +257,9 @@ func (l lifecycle) terraform(directory, path string, destroy bool) error {
 	}
 	if err := runPhase("plan"); err != nil {
 		return err
+	}
+	if planOnly {
+		return appendSummary("\n**Plan only:** no apply, backend writes, SQL provisioning, connection Secret updates, or Argo refresh was performed.\n")
 	}
 	applyErr := runPhase("apply")
 	workingState := filepath.Join(directory, "terraform.tfstate")
@@ -598,6 +611,39 @@ func (l lifecycle) prepare() error {
 	return l.unlock(path)
 }
 
+func (l lifecycle) plan() error {
+	if l.pr != 0 {
+		return errors.New("database plan-only operation requires a manual release-branch run, not a PR")
+	}
+	if err := l.authorize(); err != nil {
+		return err
+	}
+	if err := l.checkLegacyDatabase(); err != nil {
+		return err
+	}
+	if err := l.validateExistingEngine(); err != nil {
+		return err
+	}
+	namespace := l.name + "-db"
+	existing, err := get("namespace", "", namespace)
+	if err != nil {
+		return err
+	}
+	if existing != nil && !l.owned(existing) {
+		return errors.New("database namespace exists without matching ownership; refusing to plan adoption")
+	}
+	path := l.statePath("db")
+	if existing != nil {
+		if _, err := os.Stat(filepath.Join(l.backend, path, "terraform.tfstate")); err != nil {
+			return errors.New("existing database has no accessible backend state; recover/import before planning")
+		}
+	}
+	if err := l.databaseVars(namespace, false); err != nil {
+		return err
+	}
+	return l.terraformMode(l.databaseDirectory(), path, false, true)
+}
+
 func appendSummary(text string) error {
 	file, err := os.OpenFile(os.Getenv("GITHUB_STEP_SUMMARY"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
 	if err != nil {
@@ -884,8 +930,8 @@ $block$;
 }
 
 func run() error {
-	if len(os.Args) != 2 || (os.Args[1] != "resolve" && os.Args[1] != "prepare" && os.Args[1] != "cleanup") {
-		return errors.New("usage: database resolve|prepare|cleanup")
+	if len(os.Args) != 2 || (os.Args[1] != "resolve" && os.Args[1] != "prepare" && os.Args[1] != "cleanup" && os.Args[1] != "plan") {
+		return errors.New("usage: database resolve|plan|prepare|cleanup")
 	}
 	repository := os.Getenv("GITHUB_REPOSITORY")
 	if !regexp.MustCompile(`^[A-Za-z0-9_.-]+/[a-z0-9][a-z0-9-]*$`).MatchString(repository) {
@@ -927,6 +973,9 @@ func run() error {
 	}
 	if os.Args[1] == "cleanup" {
 		return l.cleanup()
+	}
+	if os.Args[1] == "plan" {
+		return l.plan()
 	}
 	if mode := os.Getenv("PR_DATABASE_ACCESS"); mode != "" && mode != "read" && mode != "write" {
 		return errors.New("PR_DATABASE_ACCESS must be read or write")

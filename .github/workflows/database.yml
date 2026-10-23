@@ -4,6 +4,7 @@ on:
   workflow_call:
     inputs:
       operation:
+        description: prepare, cleanup, or manual read-only plan.
         type: string
         default: prepare
       engine:

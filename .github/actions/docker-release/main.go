@@ -1158,6 +1158,9 @@ func (c *controller) deploymentVersion(requested string) (string, string, error)
 }
 
 func (c *controller) deploymentPrepare() error {
+	if action := os.Getenv("DEPLOY_ACTION"); action != "" && action != "plan" && action != "apply" {
+		return errors.New("deployment action must be plan or apply")
+	}
 	stateRepository := os.Getenv("STATE_REPOSITORY")
 	if !regexp.MustCompile(`^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`).MatchString(stateRepository) {
 		return errors.New("state_repository must be owner/repository")
@@ -1647,6 +1650,18 @@ func run() error {
 		return c.deploymentPrepare()
 	case "deployment-lock":
 		return c.deploymentLock()
+	case "deployment-plan-check":
+		if os.Getenv("GITHUB_EVENT_NAME") != "workflow_dispatch" || os.Getenv("DEPLOY_ACTION") != "plan" {
+			return errors.New("read-only deployment checks require a manual plan")
+		}
+		file, owner, err := c.backendLockOwner()
+		if err != nil {
+			return err
+		}
+		if file != nil {
+			return fmt.Errorf("backend is locked by run %s; wait or reconcile before planning", owner.Run)
+		}
+		return nil
 	case "preview-cleanup-prepare":
 		return c.previewCleanupPrepare()
 	case "preview-cleanup-lock":
