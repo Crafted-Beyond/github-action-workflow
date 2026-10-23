@@ -247,7 +247,6 @@ jobs:
           umask 077
           git config --file "$GIT_CONFIG_GLOBAL" "http.${GITHUB_SERVER_URL}/.extraheader" \
             "AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w 0)"
-          printf 'GIT_CONFIG_GLOBAL=%s\n' "$GIT_CONFIG_GLOBAL" >> "$GITHUB_ENV"
           export GIT_TERMINAL_PROMPT=0
           tofu init -input=false -no-color
           tofu validate -no-color

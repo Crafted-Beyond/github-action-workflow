@@ -518,10 +518,21 @@ group and is not dropped by environment serialization.
 State is pushed even after a partial apply. If pushing fails, the deployment lock stays
 held. Inspect the failed run, restore the runner's local state to its exact private
 state path, then rerun the **failed deployment job**, not the whole image build.
+Private module Git authentication is scoped to the initialize/validate shell
+step, not exported through `GITHUB_ENV`. Backend checkout supplies its own
+authentication; combining both configurations can send duplicate Authorization
+headers and reject state pushes.
 Never unlock and start from stale/empty state after a partial apply.
 On a state push failure, local state/backup are
 left in the selected `infrastructure/applications/<repository-name>` root for manual recovery rather than deleted;
 other credential-bearing files are still cleaned.
+On GitHub-hosted runners, retaining files does not preserve them after the VM
+is discarded. If the backend never received the state and the original file is
+unavailable, reconstruct ownership by importing the existing resources into the
+correct stack/state before any new apply. Review resource-specific import
+requirements; do not delete the deployed namespace or database volume to retry.
+Preview image cleanup intentionally waits for saved state and confirmed health,
+so superseded SHA tags remain after state-persistence or health-check failures.
 If the runner is abruptly terminated before state can be saved, recover its
 state before deleting its specific lock; ephemeral runners cannot guarantee
 recovery after an ungraceful crash. The Git state backend has no distributed
