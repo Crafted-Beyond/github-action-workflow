@@ -2,6 +2,40 @@
 
 GitHub Actions workflow repository.
 
+## Manual Plan / Apply controls
+
+Application callers can expose an `action` choice (`plan` or `apply`) under
+`workflow_dispatch` and pass it to `combine-workflow.yml`. New manual UI/API
+runs default to `plan`; the reusable input defaults to `apply` for compatibility
+with existing callers. PR comment builds/deployments and merge cleanup are
+unchanged.
+
+- `action: plan`: resolves the selected existing stable release image, loads
+  the saved state, and runs init/validate/plan with the usual action-count tables
+  and expandable details in the job summary. No image is built, registry
+  repository created, backend lock acquired, state pushed, apply executed, or
+  Argo Application refreshed/deployed. Existing backend locks block planning.
+- `action: apply`: plans and applies the saved plan in the same run, persists
+  partial state if needed, and waits for Argo health as before.
+
+The database reusable workflow also accepts `operation: plan`, for manual runs
+on the release branch only. It plans the permanent database infrastructure using
+its existing state (or a create plan for a new database) without creating locks,
+running SQL, changing connection Secrets, or bootstrapping credentials.
+The API caller selects this operation for Plan, then runs the API plan.
+
+Plans are observations, not reservations: another application may update backend
+state while a plan is running. Apply always generates a fresh plan and does not
+reuse a previous run's plan. Plan files remain transient and are not uploaded.
+Read-only here means no remote resource/backend mutation; local plan files and
+Actions summaries are still produced, and provider reads require credentials.
+
+Both modes require an already published stable image for application planning.
+The API plan additionally reads the existing database connection Secret. On a
+first deployment, database infrastructure can be planned, but the API plan will
+fail until database preparation has created that Secret. Plan never fabricates
+credentials or provisions a database to make the application plan succeed.
+
 ## Automatic Docker Hub repository creation
 
 The shared Docker release preflight checks the caller's image repository and,
