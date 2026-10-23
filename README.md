@@ -600,9 +600,156 @@ state before deleting its specific backend lock file; ephemeral runners cannot g
 recovery after an ungraceful crash. The Git state backend has no distributed
 locking outside this workflow: do not apply the same stack elsewhere.
 
-No tests were added. Go compilation, workflow schema/expression checks and
-OpenTofu configuration validation do not prove live registry, Kubernetes, DNS,
-or Argo CD behavior. No images, resources or state were published locally.
+Controller tests and opt-in disposable database integration tests are described
+below. Compilation and workflow/OpenTofu validation alone do not prove live
+registry, Kubernetes, DNS or Argo CD behavior.
+
+## Shared database lifecycle
+
+[database.yml](./.github/workflows/database.yml) owns database preparation and
+merged-PR cleanup for application repositories. The trusted
+[database action](./.github/actions/database/action.yml), Go controller and engine
+adapters live here, not in each application. Applications provide Terraform,
+optional idempotent schema/bootstrap files, and a short reusable-workflow call:
+
+```yaml
+jobs:
+  database:
+    uses: Crafted-Beyond/github-action-workflow/.github/workflows/database.yml@main
+    with:
+      engine: postgresql
+      state_repository: MyOrg/private-state
+      database_directory: infra/database
+      password_variable: database_password
+      schema_file: schema.sql
+    secrets:
+      GH_TOKEN: ${{ secrets.GH_TOKEN }}
+      kubeconfig: ${{ secrets.KUBECONFIG }}
+      database_password: ${{ secrets.DATABASE_PASSWORD }}
+      chart_repository_url: ${{ vars.CHART_REPOSITORY_URL }}
+```
+
+Gate the caller's prepare job on a manual release deployment or an authorized
+`/combine-deploy` issue comment; invoke `operation: cleanup` only after a merged
+same-repository PR. The controller rechecks event, repository write permission,
+open PR, release branch, `combine-deploy` and exactly one release label.
+The workflow returns `sha`; pass `needs.database.outputs.sha` as `preview_sha`
+to the shared combine workflow. PR Terraform/schema comes from that authorized
+commit; controller code always comes from this shared action. Pin the workflow
+and its internal actions consistently when adopting an immutable shared release.
+
+PR preparation uses direct apply, while actual deployments and merge cleanup
+use plan followed by saved-plan apply. Database reuse skips infrastructure
+apply. PRs default to read-only access to the application's permanent database,
+or to an isolated temporary database if no permanent server exists.
+`pr_database_access: write` always requires an isolated PR server;
+`pr_database_create: 'false'` forbids creating missing servers.
+Unset inputs use the selected GitHub environment/repository's
+`PR_DATABASE_ACCESS`/`PR_DATABASE_CREATE` variables, then `read`/`true` defaults.
+Switching access modes revokes the inactive identity and terminates its sessions.
+The controller keeps state/locks through bootstrap and credential provisioning,
+persists partial apply state, and updates separate per-stack PR comments.
+SQL/readiness failures are reported separately from Terraform apply success.
+
+### Engine contracts
+
+The workflow does **not** guess an engine's Helm chart, image, storage layout,
+architecture, licensing or migration strategy. Each application's Terraform must
+provision the selected engine using the following contract:
+
+- Inputs: `namespace`, `repository`, `temporary`, `kubeconfig_path` and the
+  password variable named by `password_variable` (default `database_password`).
+  Existing PostgreSQL roots can select `password_variable: postgres_password`.
+  Optional `database_var_file` is relative to the database root.
+- A database namespace and Argo Application named `<repository>-db` for actual
+  deployments, or `<repository>-pr<number>-db` for temporary databases.
+  Namespace labels must include `craftedbeyond.com/repository` (owner/repo with
+  `/` replaced by `.`) and `craftedbeyond.com/temporary` (`true` or `false`).
+- The Argo Application is in `argocd`. It must reconcile a single-replica
+  StatefulSet whose first pod is `<workload_name>-0`, a Service, persistent
+  storage and an admin Secret. Supply custom names with `workload_name`,
+  `service_name`, `pvc_name`, `admin_secret`, `admin_password_key` and `container`.
+  Default PVC/Secret names are `<workload>-data` and `<workload>-admin`.
+- The admin Secret password must match `database_password`. Rotation and engine
+  changes require an explicit migration; the controller refuses silent changes.
+  Configure Kubernetes readiness probes appropriately; the controller waits for
+  fresh Argo Synced/Healthy and StatefulSet readiness before using the client.
+- Restrict network access to authorized application namespaces and provision
+  backups independently. Workloads must include the client tools below.
+
+| `engine` | Default workload / port | Default admin / password key | Required client | Preview permissions |
+| --- | --- | --- | --- | --- |
+| `postgresql` | `postgres` / 5432 | `application_owner` / `POSTGRES_PASSWORD` | `psql`, local admin socket authentication | public-schema SELECT; isolated writer only |
+| `mysql` | `mysql` / 3306 | `root` / `MYSQL_ROOT_PASSWORD` | `mysql` with local socket | database SELECT; isolated database grants for writer |
+| `mariadb` | `mariadb` / 3306 | `root` / `MARIADB_ROOT_PASSWORD` | `mariadb` with local socket | same scoped grants as MySQL |
+| `mongodb` | `mongodb` / 27017 | `root` / `MONGO_INITDB_ROOT_PASSWORD` | `mongosh`, root authenticates in `admin` | database `read`; isolated `readWrite` |
+| `redis` | `redis` / 6379 | `default` / `REDIS_PASSWORD` | `redis-cli`; Redis 7+, writable persistent ACL file | explicit read/write command allowlists, only `application:*` keys |
+| `sqlserver` | `sqlserver` / 1433 | `sa` / `MSSQL_SA_PASSWORD` | `/opt/mssql-tools18/bin/sqlcmd` | `db_datareader`; isolated `db_owner` |
+
+The database name defaults to `application`; set `database_name` and
+`admin_username` when required. Redis uses logical database 0 with an
+`application:*` key prefix (no `KEYS`, `SCAN`, admin, scripting, pub/sub or
+unrestricted command-category grants). Applications must use the documented
+allowlist; unsupported commands fail instead of receiving broader access.
+Redis ACL mutations require `ACL SAVE`; lack of a persistent writable `aclfile`
+is an explicit failure. MongoDB admin access must permit user/session management.
+MySQL/MariaDB admin access must permit scoped grants, temporary revocation
+procedures and terminating preview sessions. SQL Server requires an AMD64-capable
+database node and appropriate Microsoft licensing; the ARM64 WireGuard cluster's
+current PostgreSQL deployment is not converted to SQL Server.
+
+`schema_file` and `bootstrap_file` are optional, relative to the application
+checkout, and must be idempotent. SQL engines use their native SQL dialect,
+MongoDB uses mongosh JavaScript, and Redis uses JSON command arrays such as
+`[["SET","application:initialized","true"]]`, which are encoded into RESP.
+Schema/bootstrap is not run against a permanent database reused by a PR.
+Application-specific setup belongs in these files, not in shared Go code.
+`{{BOOTSTRAP_PASSWORD}}` is replaced with an engine-encoded literal from the
+optional `bootstrap_password` secret; do not quote that placeholder again in SQL
+or JavaScript. In Redis JSON command arrays, use it inside a JSON string.
+Credentials/statements are sent to clients over stdin and are not logged;
+client errors are sanitized because they may echo credential-bearing input.
+For MySQL/MariaDB, use the generated `DATABASE_HOST`, `DATABASE_PORT`,
+`DATABASE_NAME`, `DATABASE_USER` and `DATABASE_PASSWORD` when a driver expects
+its own DSN syntax rather than the supplied `mysql://` connection URI.
+
+Connection Secrets remain in `argocd` as `<repository>[-pr<number>]-database`,
+with repository/PR ownership labels and `DATABASE_*` fields including engine,
+port, URL, namespace, access mode and temporary ownership. Existing legacy
+PostgreSQL connection Secrets without an engine field are supported.
+An owned Secret's server-side field management is adopted by `database-workflow`;
+Secrets with another repository/PR owner are never adopted.
+State paths are unchanged: `combine/<owner>/<repo>/db`, `pr<number>-db` and
+`pr<number>` for API cleanup. Pass the **same** configuration for prepare and
+cleanup. `state_repository`/`state_ref` select the private backend. `api_directory`
+and `api_var_file` select the combine-compatible API root for merge cleanup;
+provide its registry/application secrets through the reusable secret inputs.
+Use `release_branch`, `environment` and `runs_on` for caller-specific settings.
+As with other reusable workflows, selected GitHub environments must use the
+reusable secret names (`database_password`, `bootstrap_password`, `kubeconfig`,
+etc.) for environment-specific overrides. Caller mappings still accept existing
+repository secret names; rename/copy environment overrides before switching a
+caller that previously ran its own environment-bound job.
+Applications still using a legacy application-owned PostgreSQL PVC must migrate
+before enabling this lifecycle; it will not adopt/delete that PVC silently.
+
+### Database validation
+
+```bash
+go -C .github/actions/database test ./...
+go -C .github/actions/database vet ./...
+# Opt in only on a test host: creates/removes labelled containers and their
+# disposable anonymous volumes, never mounts host data or publishes ports.
+DATABASE_ENGINE_INTEGRATION=1 go -C .github/actions/database test \
+  -run TestDatabaseEnginesIntegration -v -timeout 35m
+```
+
+Integration checks exercise bootstrap, reader queries, denied writes, credential
+revocation and isolated writer grants. `DATABASE_TEST_ENGINE` selects one engine.
+`DATABASE_TEST_REGISTRY=public.ecr.aws/docker/library` uses the public official-image
+mirror when Docker Hub authentication is unavailable. SQL Server integration
+additionally requires an AMD64 host and explicit `DATABASE_SQLSERVER_EULA=Y`;
+it is skipped, not claimed as tested, otherwise.
 
 ## OpenTofu CI/CD with a Git state backend
 

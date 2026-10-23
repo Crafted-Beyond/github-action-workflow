@@ -1,0 +1,125 @@
+name: Shared application database lifecycle
+description: Prepare independent Argo database infrastructure or clean up a merged PR.
+inputs:
+  operation:
+    required: true
+    description: prepare or cleanup
+outputs:
+  sha:
+    description: Authorized source commit used for database infrastructure.
+    value: ${{ steps.resolve.outputs.sha }}
+runs:
+  using: composite
+  steps:
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+          cache: false
+
+      - name: Authorize and capture database source commit
+        if: inputs.operation == 'prepare'
+        id: resolve
+        shell: bash
+        env:
+          DATABASE_CONTROL: ${{ github.action_path }}
+        run: go -C "$DATABASE_CONTROL" run . resolve
+
+      - name: Checkout application infrastructure
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.operation == 'prepare' && steps.resolve.outputs.sha || github.sha }}
+          path: source
+          token: ${{ env.GH_TOKEN }}
+          persist-credentials: false
+
+      - name: Checkout private state backend
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.STATE_REPOSITORY }}
+          ref: ${{ env.STATE_REF }}
+          token: ${{ env.GH_TOKEN }}
+          path: .database-state
+
+      - uses: azure/setup-kubectl@v4
+
+      - uses: Crafted-Beyond/github-action-workflow/.github/actions/setup-tofu@main
+
+      - name: Prepare isolated credentials
+        env:
+          CLUSTER_CONFIG: ${{ env.CLUSTER_CONFIG }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          printf '%s\n' "$CLUSTER_CONFIG" > "$RUNNER_TEMP/database-kubeconfig"
+          printf 'KUBECONFIG=%s\nTF_VAR_kubeconfig_path=%s\n' \
+            "$RUNNER_TEMP/database-kubeconfig" "$RUNNER_TEMP/database-kubeconfig" >> "$GITHUB_ENV"
+          git config --file "$RUNNER_TEMP/database-gitconfig" \
+            "http.${GITHUB_SERVER_URL}/.extraheader" \
+            "AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w 0)"
+
+      - name: Run database lifecycle
+        id: lifecycle
+        env:
+          DATABASE_OPERATION: ${{ inputs.operation }}
+          DATABASE_SOURCE_SHA: ${{ steps.resolve.outputs.sha }}
+          DATABASE_CONTROL: ${{ github.action_path }}
+          DATABASE_REPORT_SCRIPT: ${{ github.action_path }}/../tofu-plan/lifecycle.sh
+        shell: bash
+        run: |
+          set -euo pipefail
+          export GIT_CONFIG_GLOBAL="$RUNNER_TEMP/database-gitconfig"
+          # Backend checkout has its own header; prevent a duplicate during pushes.
+          git -C .database-state config --local --unset-all "http.${GITHUB_SERVER_URL}/.extraheader"
+          export TOFU_SOURCE_SHA="$(git -C source rev-parse HEAD)"
+          go -C "$DATABASE_CONTROL" run . "$DATABASE_OPERATION"
+
+      - name: Find Terraform reports
+        if: always()
+        id: reports
+        env:
+          LIFECYCLE_RESULT: ${{ steps.lifecycle.outcome }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f "$RUNNER_TEMP/database-plan.md" ]; then
+            {
+              printf '## Database Terraform\n\n'
+              printf 'No database Terraform report was produced. Existing-database reuse intentionally skips plan/apply. For failed runs, inspect the lifecycle log; this is not a successful plan/apply result.\n'
+            } > "$RUNNER_TEMP/database-plan.md"
+          fi
+          for stack in database api-cleanup; do
+            if [ -f "$RUNNER_TEMP/$stack-plan.md" ]; then
+              printf '\nOverall database lifecycle result (including SQL/readiness/cleanup): **%s**.\n' \
+                "$LIFECYCLE_RESULT" | tee -a "$RUNNER_TEMP/$stack-plan.md" >> "$GITHUB_STEP_SUMMARY"
+              printf '%s=true\n' "${stack//-/_}" >> "$GITHUB_OUTPUT"
+            fi
+          done
+
+      - name: Update database Terraform PR comment
+        if: ${{ !cancelled() && env.PR_NUMBER != '0' && steps.reports.outputs.database == 'true' }}
+        uses: Crafted-Beyond/github-action-workflow/.github/actions/pr-comment@main
+        with:
+          token: ${{ env.GH_TOKEN }}
+          pr_number: ${{ env.PR_NUMBER }}
+          body_file: ${{ runner.temp }}/database-plan.md
+          marker: tofu-plan:combine/${{ github.repository }}/pr${{ env.PR_NUMBER }}-db
+
+      - name: Update API cleanup Terraform PR comment
+        if: ${{ !cancelled() && env.PR_NUMBER != '0' && steps.reports.outputs.api_cleanup == 'true' }}
+        uses: Crafted-Beyond/github-action-workflow/.github/actions/pr-comment@main
+        with:
+          token: ${{ env.GH_TOKEN }}
+          pr_number: ${{ env.PR_NUMBER }}
+          body_file: ${{ runner.temp }}/api-cleanup-plan.md
+          marker: tofu-plan:combine/${{ github.repository }}/pr${{ env.PR_NUMBER }}
+
+      - name: Remove transient credentials
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f -- "$RUNNER_TEMP/database-kubeconfig" "$RUNNER_TEMP/database-gitconfig"
+          rm -f -- "source/$API_DIRECTORY/lifecycle.auto.tfvars.json" "source/$DATABASE_DIRECTORY/lifecycle.auto.tfvars.json"
+          rm -f -- "source/$API_DIRECTORY/lifecycle.tfplan" "source/$DATABASE_DIRECTORY/lifecycle.tfplan"
+          rm -f -- "$RUNNER_TEMP/database-plan.md" "$RUNNER_TEMP/api-cleanup-plan.md"

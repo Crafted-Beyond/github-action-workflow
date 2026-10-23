@@ -1,0 +1,154 @@
+name: Shared database lifecycle
+
+on:
+  workflow_call:
+    inputs:
+      operation:
+        type: string
+        default: prepare
+      engine:
+        type: string
+        default: postgresql
+      state_repository:
+        type: string
+        required: true
+      state_ref:
+        type: string
+        default: main
+      database_directory:
+        type: string
+        default: infra/database
+      api_directory:
+        type: string
+        default: infra/api
+      api_var_file:
+        type: string
+        default: environments/prod.tfvars
+      database_var_file:
+        type: string
+        default: ""
+      password_variable:
+        type: string
+        description: Terraform variable receiving the database administrator password.
+        default: database_password
+      schema_file:
+        type: string
+        default: ""
+      bootstrap_file:
+        type: string
+        default: ""
+      database_name:
+        type: string
+        default: application
+      admin_username:
+        type: string
+        default: ""
+      workload_name:
+        type: string
+        default: ""
+      service_name:
+        type: string
+        default: ""
+      pvc_name:
+        type: string
+        default: ""
+      admin_secret:
+        type: string
+        default: ""
+      admin_password_key:
+        type: string
+        default: ""
+      container:
+        type: string
+        default: ""
+      pr_database_access:
+        type: string
+        default: ""
+      pr_database_create:
+        type: string
+        default: ""
+      environment:
+        type: string
+        default: prod
+      release_branch:
+        type: string
+        default: main
+      runs_on:
+        type: string
+        default: '"ubuntu-latest"'
+    secrets:
+      GH_TOKEN:
+        required: true
+      kubeconfig:
+        required: true
+      database_password:
+        required: true
+      bootstrap_password:
+        required: false
+      chart_repository_url:
+        required: true
+      registry_username:
+        required: false
+      registry_password:
+        required: false
+      application_secrets:
+        required: false
+    outputs:
+      sha:
+        description: Authorized application source commit.
+        value: ${{ jobs.database.outputs.sha }}
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  database:
+    runs-on: ${{ fromJSON(inputs.runs_on) }}
+    timeout-minutes: 45
+    environment: ${{ github.event_name == 'workflow_dispatch' && inputs.environment || 'preview' }}
+    concurrency:
+      group: database-${{ github.repository }}
+      cancel-in-progress: false
+    outputs:
+      sha: ${{ steps.database.outputs.sha }}
+    env:
+      PR_NUMBER: ${{ github.event.issue.number || github.event.pull_request.number || 0 }}
+      GH_TOKEN: ${{ secrets.GH_TOKEN }}
+      CLUSTER_CONFIG: ${{ secrets.kubeconfig }}
+      DATABASE_PASSWORD: ${{ secrets.database_password }}
+      DATABASE_BOOTSTRAP_PASSWORD: ${{ secrets.bootstrap_password }}
+      DATABASE_ENGINE: ${{ inputs.engine }}
+      DATABASE_NAME: ${{ inputs.database_name }}
+      DATABASE_ADMIN_USERNAME: ${{ inputs.admin_username }}
+      DATABASE_WORKLOAD: ${{ inputs.workload_name }}
+      DATABASE_SERVICE: ${{ inputs.service_name }}
+      DATABASE_PVC: ${{ inputs.pvc_name }}
+      DATABASE_ADMIN_SECRET: ${{ inputs.admin_secret }}
+      DATABASE_PASSWORD_KEY: ${{ inputs.admin_password_key }}
+      DATABASE_CONTAINER: ${{ inputs.container }}
+      DATABASE_PASSWORD_VARIABLE: ${{ inputs.password_variable }}
+      DATABASE_SCHEMA_FILE: ${{ inputs.schema_file }}
+      DATABASE_BOOTSTRAP_FILE: ${{ inputs.bootstrap_file }}
+      DATABASE_DIRECTORY: ${{ inputs.database_directory }}
+      DATABASE_VAR_FILE: ${{ inputs.database_var_file }}
+      API_DIRECTORY: ${{ inputs.api_directory }}
+      API_VAR_FILE: ${{ inputs.api_var_file }}
+      STATE_REPOSITORY: ${{ inputs.state_repository }}
+      STATE_REF: ${{ inputs.state_ref }}
+      RELEASE_BRANCH: ${{ inputs.release_branch }}
+      PR_DATABASE_ACCESS: ${{ inputs.pr_database_access || vars.PR_DATABASE_ACCESS || 'read' }}
+      PR_DATABASE_CREATE: ${{ inputs.pr_database_create || vars.PR_DATABASE_CREATE || 'true' }}
+      REGISTRY_USERNAME: ${{ secrets.registry_username }}
+      TF_VAR_github_token: ${{ secrets.GH_TOKEN }}
+      TF_VAR_chart_repository_url: ${{ secrets.chart_repository_url }}
+      TF_VAR_registry_username: ${{ secrets.registry_username }}
+      TF_VAR_registry_password: ${{ secrets.registry_password }}
+      TF_VAR_application_secrets: ${{ secrets.application_secrets || '{}' }}
+      TF_IN_AUTOMATION: "true"
+    steps:
+      - name: Run shared database lifecycle
+        id: database
+        uses: Crafted-Beyond/github-action-workflow/.github/actions/database@main
+        with:
+          operation: ${{ inputs.operation }}
