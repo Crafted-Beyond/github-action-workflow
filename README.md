@@ -5,10 +5,25 @@ GitHub Actions workflow repository.
 ## Automatic Docker Hub repository creation
 
 The shared Docker release preflight checks the caller's image repository and,
-when missing, creates it as **private**, then verifies access. This applies to
+when missing, creates it as **private** by default, then verifies access. This applies to
 every application using the standard Docker Hub adapter, not just WireGuard.
 Existing repositories retain their visibility. Creation failures never fall back
 to public images.
+
+Both `combine-workflow.yml` and `docker-image.yml` accept
+`repository_visibility: private|public`. Set it explicitly in the caller:
+
+```yaml
+with:
+  image: john24rel/my-application
+  repository_visibility: public
+```
+
+This controls only creation of missing Docker Hub repositories. It never changes
+an existing repository's visibility. Public images are downloadable by anyone,
+including PR images; do not bake credentials or confidential content into them.
+Invalid values fail before repository requests. The WireGuard UI opts into public
+creation; callers omitting this input (including the API) stay private by default.
 
 For failed creation requests, recognized Docker Hub JSON messages are classified
 as authorization, namespace, or repository-allowance/subscription restrictions.

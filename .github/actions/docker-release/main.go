@@ -824,6 +824,13 @@ func (r *registryClient) ensureRepository() error {
 	if r.script != "" {
 		return nil
 	}
+	visibility := os.Getenv("REPOSITORY_VISIBILITY")
+	if visibility == "" {
+		visibility = "private"
+	}
+	if visibility != "private" && visibility != "public" {
+		return errors.New("repository_visibility must be private or public")
+	}
 	address := "https://hub.docker.com/v2/repositories/" + r.controller.image + "/"
 	status, err := r.controller.request("GET", address, "JWT "+r.token, nil, nil)
 	if err != nil {
@@ -839,10 +846,10 @@ func (r *registryClient) ensureRepository() error {
 	status, createErr := r.controller.request("POST", "https://hub.docker.com/v2/repositories/", "JWT "+r.token, map[string]any{
 		"namespace":  parts[0],
 		"name":       parts[1],
-		"is_private": true,
+		"is_private": visibility == "private",
 	}, nil)
 	if createErr != nil && status != http.StatusConflict {
-		return fmt.Errorf("cannot create private Docker Hub repository %s: %w", r.controller.image, createErr)
+		return fmt.Errorf("cannot create %s Docker Hub repository %s: %w", visibility, r.controller.image, createErr)
 	}
 	status, err = r.controller.request("GET", address, "JWT "+r.token, nil, nil)
 	if err != nil {

@@ -12,6 +12,10 @@ on:
       registry_adapter:
         type: string
         default: dockerhub
+      repository_visibility:
+        description: Visibility for automatic Docker Hub repository creation, private or public. Existing repositories are unchanged.
+        type: string
+        default: private
       registry_cleanup_script:
         type: string
         default: ""
@@ -112,6 +116,7 @@ jobs:
       image: ${{ inputs.image }}
       registry: ${{ inputs.registry }}
       registry_adapter: ${{ inputs.registry_adapter }}
+      repository_visibility: ${{ inputs.repository_visibility }}
       registry_cleanup_script: ${{ inputs.registry_cleanup_script }}
       release_branch: ${{ inputs.release_branch }}
       context: ${{ inputs.context }}

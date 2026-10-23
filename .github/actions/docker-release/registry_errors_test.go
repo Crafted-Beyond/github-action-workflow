@@ -33,6 +33,7 @@ func TestDockerRepositoryErrorRedaction(t *testing.T) {
 }
 
 func TestAutomaticPrivateRepositoryCreation(t *testing.T) {
+	t.Setenv("REPOSITORY_VISIBILITY", "")
 	for _, image := range []string{"john24rel/wireguard-ui", "john24rel/future-application"} {
 		t.Run(image, func(t *testing.T) {
 			created := false
@@ -62,7 +63,64 @@ func TestAutomaticPrivateRepositoryCreation(t *testing.T) {
 	}
 }
 
+func TestRepositoryVisibility(t *testing.T) {
+	for _, visibility := range []string{"private", "public", "invalid"} {
+		t.Run(visibility, func(t *testing.T) {
+			t.Setenv("REPOSITORY_VISIBILITY", visibility)
+			created := false
+			requests := 0
+			client := &http.Client{Transport: registryCreationTransport(func(r *http.Request) (*http.Response, error) {
+				requests++
+				status := http.StatusOK
+				if r.Method == http.MethodGet && !created {
+					status = http.StatusNotFound
+				}
+				if r.Method == http.MethodPost {
+					data, err := io.ReadAll(r.Body)
+					if err != nil {
+						t.Fatal(err)
+					}
+					want := `"is_private":false`
+					if visibility == "private" {
+						want = `"is_private":true`
+					}
+					if !bytes.Contains(data, []byte(want)) {
+						t.Fatalf("visibility %s sent wrong creation payload: %s", visibility, data)
+					}
+					created = true
+					status = http.StatusCreated
+				}
+				return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader("{}")), Header: make(http.Header)}, nil
+			})}
+			registry := &registryClient{controller: &controller{image: "org/new-app", client: client}}
+			err := registry.ensureRepository()
+			if visibility == "invalid" {
+				if err == nil || requests != 0 {
+					t.Fatalf("invalid visibility must fail before requests: %v, %d", err, requests)
+				}
+			} else if err != nil || !created || requests != 3 {
+				t.Fatalf("creation/verification failed: %v, created=%t, requests=%d", err, created, requests)
+			}
+		})
+	}
+}
+
+func TestExistingRepositoryVisibilityUnchanged(t *testing.T) {
+	t.Setenv("REPOSITORY_VISIBILITY", "public")
+	client := &http.Client{Transport: registryCreationTransport(func(r *http.Request) (*http.Response, error) {
+		if r.Method != http.MethodGet {
+			t.Fatal("existing repository visibility must not be mutated")
+		}
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("{}")), Header: make(http.Header)}, nil
+	})}
+	registry := &registryClient{controller: &controller{image: "org/existing-app", client: client}}
+	if err := registry.ensureRepository(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRepositoryCreationFailureDiagnostic(t *testing.T) {
+	t.Setenv("REPOSITORY_VISIBILITY", "")
 	requests := 0
 	client := &http.Client{Transport: registryCreationTransport(func(r *http.Request) (*http.Response, error) {
 		requests++
