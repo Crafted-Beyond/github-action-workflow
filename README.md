@@ -639,6 +639,8 @@ and its internal actions consistently when adopting an immutable shared release.
 
 PR preparation, actual deployments and merge cleanup all use plan followed by
 saved-plan apply. Database readiness waits log progress every 30 seconds.
+Readiness treats Argo's omitted empty Helm `valueFiles` list as equivalent to
+an explicit empty list, while still rejecting changed values or source revisions.
 Database reuse skips infrastructure
 apply. PRs default to read-only access to the application's permanent database,
 or to an isolated temporary database if no permanent server exists.

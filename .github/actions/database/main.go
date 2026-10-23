@@ -12,7 +12,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
@@ -410,7 +409,7 @@ func (l lifecycle) waitDatabaseApplication(name string) error {
 			}
 		}
 		if !app.Status.ReconciledAt.Before(start) && app.Status.Sync.Status == "Synced" &&
-			app.Status.Health.Status == "Healthy" && reflect.DeepEqual(app.Spec.Source, app.Status.Sync.ComparedTo.Source) {
+			app.Status.Health.Status == "Healthy" && databaseSourcesEqual(app.Spec.Source, app.Status.Sync.ComparedTo.Source) {
 			_, err := command("", "", "kubectl", "-n", name, "rollout", "status", "statefulset/"+l.config.workload, "--timeout=60s")
 			return err
 		}
