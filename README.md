@@ -833,6 +833,17 @@ caller that previously ran its own environment-bound job.
 Applications still using a legacy application-owned PostgreSQL PVC must migrate
 before enabling this lifecycle; it will not adopt/delete that PVC silently.
 
+### Database Kubernetes diagnostics
+
+The lifecycle logs the resource identity before Kubernetes lookups. Each lookup
+uses a 15-second request timeout and a 30-second process deadline. Failures identify
+the resource and classify timeouts, authentication, RBAC, TLS and connection
+errors without printing Secret contents, SQL input or raw kubectl stderr.
+Unknown failures remain explicitly reported with sensitive output suppressed.
+Checks must run from the Actions runner with its configured `KUBECONFIG`;
+successful access from a developer's machine does not establish runner access.
+Do not delete PVCs or backend locks to diagnose a connection failure.
+
 ### Database validation
 
 ```bash

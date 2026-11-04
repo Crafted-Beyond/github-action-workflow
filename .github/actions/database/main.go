@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -38,7 +39,11 @@ func (l lifecycle) readOnly() bool {
 }
 
 func command(directory, input, name string, args ...string) ([]byte, error) {
-	cmd := exec.Command(name, args...)
+	return commandContext(context.Background(), directory, input, name, args...)
+}
+
+func commandContext(ctx context.Context, directory, input, name string, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = directory
 	cmd.Stdin = strings.NewReader(input)
 	var stderr bytes.Buffer
@@ -48,16 +53,48 @@ func command(directory, input, name string, args ...string) ([]byte, error) {
 		if name == "git" || name == "tofu" {
 			return nil, fmt.Errorf("%s failed: %w\n%s", name, err, stderr.String())
 		}
+		if name == "kubectl" {
+			// Classify stderr without publishing SQL, Secret data, endpoints or credentials.
+			return nil, fmt.Errorf("kubectl failed: %w; %s", err, kubernetesFailureHint(ctx, stderr.String()))
+		}
 		// SQL and Secret validation errors can echo their credential-bearing input.
 		return nil, fmt.Errorf("%s failed: %w; inspect cluster events and backend ownership before retrying", name, err)
 	}
 	return out, nil
 }
 
+func kubernetesFailureHint(ctx context.Context, stderr string) string {
+	message := strings.ToLower(stderr)
+	switch {
+	case errors.Is(ctx.Err(), context.DeadlineExceeded), strings.Contains(message, "timeout"), strings.Contains(message, "deadline exceeded"):
+		return "Kubernetes request timed out; verify the Actions runner can reach the API server configured in the KUBECONFIG secret"
+	case strings.Contains(message, "forbidden"):
+		return "Kubernetes access forbidden; check RBAC for the identity in the KUBECONFIG secret"
+	case strings.Contains(message, "unauthorized"), strings.Contains(message, "provide credentials"), strings.Contains(message, "must be logged in"):
+		return "Kubernetes authentication failed; check the credentials in the KUBECONFIG secret"
+	case strings.Contains(message, "x509"), strings.Contains(message, "tls handshake"), strings.Contains(message, "certificate"):
+		return "Kubernetes TLS verification failed; check the API server certificate and kubeconfig CA"
+	case strings.Contains(message, "connection refused"), strings.Contains(message, "no route to host"), strings.Contains(message, "no such host"):
+		return "Kubernetes API connection failed; check runner DNS, routing, firewall and the kubeconfig server address"
+	default:
+		return "Kubernetes operation failed; stderr suppressed to protect credentials; inspect cluster events and resource ownership before retrying"
+	}
+}
+
 func get(kind, namespace, name string) (*object, error) {
-	data, err := command("", "", "kubectl", "-n", namespace, "get", kind, name, "--ignore-not-found", "-o", "json")
-	if err != nil || len(bytes.TrimSpace(data)) == 0 {
-		return nil, err
+	scope := namespace
+	if scope == "" {
+		scope = "cluster"
+	}
+	fmt.Printf("Reading Kubernetes %s %s (scope: %s)\n", kind, name, scope)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	data, err := commandContext(ctx, "", "", "kubectl", "--request-timeout=15s", "-n", namespace, "get", kind, name, "--ignore-not-found", "-o", "json")
+	if err != nil {
+		return nil, fmt.Errorf("read Kubernetes %s %s (scope: %s): %w", kind, name, scope, err)
+	}
+	if len(bytes.TrimSpace(data)) == 0 {
+		return nil, nil
 	}
 	var result object
 	if err := json.Unmarshal(data, &result); err != nil {
