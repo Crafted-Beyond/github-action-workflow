@@ -515,7 +515,7 @@ No destroy command is added.
 For repository `wireguard-api`, PR 42 uses namespace, project, Application and
 Helm release `wireguard-api-pr42`; its hostname is
 `wireguard-api-pr42.<domain>`. The chart derives application Deployment, Service
-and HTTPRoute names from that release. The Terraform combine module validates
+and VirtualService (or legacy HTTPRoute) names from that release. The Terraform combine module validates
 names; override its base `name` for long or non-DNS-safe repository names.
 
 Actual environments default to the repository name for these resources. Use
@@ -530,7 +530,17 @@ Each central application root calls `module "combine"` and supplies native
 `helm_values` for ports, resources, probes, configuration and workflow definitions.
 Chart revision/path, domain, Argo CD namespace and optional application base name
 are Terraform module arguments, not workflow inputs. For routed applications,
-enable `helm_values.httpRoute` and configure its Gateway `parentRefs` in HCL.
+configure `helm_values.virtualService` with `enabled=true`, release-derived
+`hosts`, the Istio Gateway reference
+`istio-classic-ingress/istio-classic-staging` and the Tunnel ExternalDNS target
+in HCL. This is the current platform standard for production, future apps and
+API/UI previews; Ambient waypoint routing requires the explicit Alpha opt-in.
+The public path is Cloudflare edge -> Tunnel -> cloudflared -> classic ingress
+ClusterIP/Envoy -> VirtualService destination -> Service/selected waypoint ->
+ready app endpoint. HTTPRoute and its Gateway API `parentRefs` remain supported
+for other callers, but are not used by current platform apps. Never overlap both
+route types for the same workload. The completed migration needs no one-time
+workflow or activation ConfigMap.
 Workflow-only applications can omit routing entirely.
 The workflow passes a `combine_runtime` object containing only repository,
 environment, PR number, preview flag, full SHA, registry and immutable image/tag.
@@ -559,9 +569,11 @@ source is not compared because no-op Helm configuration changes need not create
 a new sync operation. When routing is enabled, VirtualService applications
 require valid ingress gateway/backend references and a running Ready gateway
 pod. Legacy HTTPRoute applications still require HTTPRoute
-`Accepted` and `ResolvedRefs` for the current generation. Gateway listeners must
-allow routes from the preview namespaces; DNS/wildcard DNS and TLS must already
-route these hostnames to that Gateway. This checks controller readiness, not an
+`Accepted` and `ResolvedRefs` for the current generation. Legacy Gateway API
+listeners must permit preview namespace attachments. Public Istio Gateway
+servers and VirtualService hosts must cover the selected hostname; DNS/wildcard
+DNS, Tunnel origins and edge TLS must already route it to that ingress. This
+checks controller and workload readiness, not an
 external HTTP smoke test.
 
 Older same-PR image tags are deleted during image publication, independently of
