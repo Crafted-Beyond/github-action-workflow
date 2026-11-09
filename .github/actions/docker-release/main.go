@@ -1415,33 +1415,11 @@ func (c *controller) deploymentComplete() error {
 		if err != nil {
 			return err
 		}
-		var app struct {
-			Spec   struct{ Source map[string]any } `json:"spec"`
-			Status struct {
-				ReconciledAt time.Time               `json:"reconciledAt"`
-				Health       struct{ Status string } `json:"health"`
-				Sync         struct {
-					Status     string                          `json:"status"`
-					Revision   string                          `json:"revision"`
-					ComparedTo struct{ Source map[string]any } `json:"comparedTo"`
-				} `json:"sync"`
-				OperationState struct {
-					Phase      string `json:"phase"`
-					SyncResult struct {
-						Source   map[string]any `json:"source"`
-						Revision string         `json:"revision"`
-					} `json:"syncResult"`
-				} `json:"operationState"`
-			} `json:"status"`
-		}
+		var app deploymentApplication
 		if err := json.Unmarshal(data, &app); err != nil {
 			return errors.New("invalid Argo CD Application response")
 		}
-		if !app.Status.ReconciledAt.Before(start) && app.Status.Sync.Status == "Synced" &&
-			app.Status.Health.Status == "Healthy" && reflect.DeepEqual(app.Spec.Source, app.Status.Sync.ComparedTo.Source) &&
-			app.Status.OperationState.Phase == "Succeeded" &&
-			reflect.DeepEqual(app.Spec.Source, app.Status.OperationState.SyncResult.Source) &&
-			app.Status.Sync.Revision == app.Status.OperationState.SyncResult.Revision {
+		if app.readySince(start) {
 			ready := true
 			if os.Getenv("DEPLOY_ROUTE_ENABLED") == "true" {
 				var err error
@@ -1455,16 +1433,86 @@ func (c *controller) deploymentComplete() error {
 				break
 			}
 		}
+		if attempt%6 == 0 {
+			fmt.Printf("Waiting for Argo CD: sync=%s health=%s operation=%s currentSourceCompared=%t\n",
+				app.Status.Sync.Status, app.Status.Health.Status, app.Status.OperationState.Phase,
+				reflect.DeepEqual(app.Spec.Source, app.Status.Sync.ComparedTo.Source))
+		}
 		time.Sleep(10 * time.Second)
 	}
 	if !healthy {
-		return errors.New("Argo CD and HTTPRoute did not become synced, healthy and accepted within 20 minutes")
+		return errors.New("Argo CD and its public route did not become synced, healthy and ready within 20 minutes")
 	}
 	return output("healthy", "true")
 }
 
+type deploymentApplication struct {
+	Spec   struct{ Source map[string]any } `json:"spec"`
+	Status struct {
+		ReconciledAt time.Time               `json:"reconciledAt"`
+		Health       struct{ Status string } `json:"health"`
+		Sync         struct {
+			Status     string                          `json:"status"`
+			Revision   string                          `json:"revision"`
+			ComparedTo struct{ Source map[string]any } `json:"comparedTo"`
+		} `json:"sync"`
+		OperationState struct {
+			Phase      string `json:"phase"`
+			SyncResult struct {
+				Revision string `json:"revision"`
+			} `json:"syncResult"`
+		} `json:"operationState"`
+	} `json:"status"`
+}
+
+func (app deploymentApplication) readySince(start time.Time) bool {
+	return !app.Status.ReconciledAt.Before(start) &&
+		app.Status.Sync.Status == "Synced" && app.Status.Health.Status == "Healthy" &&
+		reflect.DeepEqual(app.Spec.Source, app.Status.Sync.ComparedTo.Source) &&
+		app.Status.OperationState.Phase == "Succeeded" &&
+		app.Status.Sync.Revision != "" && app.Status.Sync.Revision == app.Status.OperationState.SyncResult.Revision
+}
+
 func routeReady(namespace, name string) (bool, error) {
-	data, err := kubectl("-n", namespace, "get", "httproute", name, "-o", "json")
+	data, err := kubectl("-n", namespace, "get", "virtualservice", name, "--ignore-not-found", "-o", "json")
+	if err != nil {
+		return false, err
+	}
+	if len(bytes.TrimSpace(data)) > 0 {
+		gateways, err := virtualServiceGateways(data, namespace)
+		if err != nil {
+			return false, err
+		}
+		for _, gateway := range gateways {
+			data, err := kubectl("-n", gateway[0], "get", "gateway.networking.istio.io", gateway[1], "-o", "json")
+			if err != nil {
+				return false, err
+			}
+			var resource struct {
+				Spec struct {
+					Selector map[string]string `json:"selector"`
+				} `json:"spec"`
+			}
+			if err := json.Unmarshal(data, &resource); err != nil || len(resource.Spec.Selector) == 0 {
+				return false, errors.New("Istio Gateway requires a valid workload selector")
+			}
+			selectors := make([]string, 0, len(resource.Spec.Selector))
+			for key, value := range resource.Spec.Selector {
+				selectors = append(selectors, key+"="+value)
+			}
+			sort.Strings(selectors)
+			data, err = kubectl("-n", gateway[0], "get", "pods", "-l", strings.Join(selectors, ","), "-o", "json")
+			if err != nil {
+				return false, err
+			}
+			ready, err := gatewayPodsReady(data)
+			if err != nil || !ready {
+				return ready, err
+			}
+		}
+		return true, nil
+	}
+	data, err = kubectl("-n", namespace, "get", "httproute", name, "-o", "json")
 	if err != nil {
 		return false, err
 	}
@@ -1506,6 +1554,86 @@ func routeReady(namespace, name string) (bool, error) {
 		}
 	}
 	return true, nil
+}
+
+func virtualServiceGateways(data []byte, namespace string) ([][2]string, error) {
+	var route struct {
+		Spec struct {
+			Hosts    []string `json:"hosts"`
+			Gateways []string `json:"gateways"`
+			HTTP     []struct {
+				Route []struct {
+					Destination struct {
+						Host string `json:"host"`
+						Port struct {
+							Number int `json:"number"`
+						} `json:"port"`
+					} `json:"destination"`
+				} `json:"route"`
+			} `json:"http"`
+		} `json:"spec"`
+	}
+	if err := json.Unmarshal(data, &route); err != nil {
+		return nil, errors.New("invalid VirtualService response")
+	}
+	if len(route.Spec.Hosts) == 0 || len(route.Spec.Gateways) == 0 || len(route.Spec.HTTP) == 0 {
+		return nil, errors.New("public VirtualService requires hosts, gateways and HTTP routes")
+	}
+	for _, rule := range route.Spec.HTTP {
+		if len(rule.Route) == 0 {
+			return nil, errors.New("public VirtualService requires HTTP backend destinations")
+		}
+		for _, target := range rule.Route {
+			if target.Destination.Host == "" || target.Destination.Port.Number < 1 || target.Destination.Port.Number > 65535 {
+				return nil, errors.New("VirtualService requires a backend hostname and valid port")
+			}
+		}
+	}
+	gateways := make([][2]string, 0, len(route.Spec.Gateways))
+	for _, name := range route.Spec.Gateways {
+		parts := strings.Split(name, "/")
+		if len(parts) == 1 {
+			parts = []string{namespace, name}
+		}
+		if len(parts) != 2 || len(parts[0]) > 63 || len(parts[1]) > 63 ||
+			!regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`).MatchString(parts[0]) ||
+			!regexp.MustCompile(`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`).MatchString(parts[1]) || parts[1] == "mesh" {
+			return nil, errors.New("public VirtualService requires namespace/name ingress gateways")
+		}
+		gateways = append(gateways, [2]string{parts[0], parts[1]})
+	}
+	return gateways, nil
+}
+
+func gatewayPodsReady(data []byte) (bool, error) {
+	var pods struct {
+		Items []struct {
+			Metadata struct {
+				DeletionTimestamp *string `json:"deletionTimestamp"`
+			} `json:"metadata"`
+			Status struct {
+				Phase      string `json:"phase"`
+				Conditions []struct {
+					Type   string `json:"type"`
+					Status string `json:"status"`
+				} `json:"conditions"`
+			} `json:"status"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(data, &pods); err != nil {
+		return false, errors.New("invalid Istio Gateway pod response")
+	}
+	for _, pod := range pods.Items {
+		if pod.Metadata.DeletionTimestamp != nil || pod.Status.Phase != "Running" {
+			continue
+		}
+		for _, condition := range pod.Status.Conditions {
+			if condition.Type == "Ready" && condition.Status == "True" {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
 }
 
 func deploymentCleanup() error {

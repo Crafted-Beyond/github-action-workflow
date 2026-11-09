@@ -553,7 +553,12 @@ cascading deletion finalizer. Existing resources owned by another state require
 a deliberate migration/import, not a second owner.
 
 Deployment waits for a fresh Argo CD reconciliation, matching requested source,
-successful sync operation and healthy application. When routing is enabled it requires HTTPRoute
+successful sync operation and healthy application. The freshly reconciled
+`comparedTo.source` must match the desired source; the historical operation's
+source is not compared because no-op Helm configuration changes need not create
+a new sync operation. When routing is enabled, VirtualService applications
+require valid ingress gateway/backend references and a running Ready gateway
+pod. Legacy HTTPRoute applications still require HTTPRoute
 `Accepted` and `ResolvedRefs` for the current generation. Gateway listeners must
 allow routes from the preview namespaces; DNS/wildcard DNS and TLS must already
 route these hostnames to that Gateway. This checks controller readiness, not an
