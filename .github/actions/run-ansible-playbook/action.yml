@@ -1,0 +1,107 @@
+name: Run Ansible Playbook
+description: Validate and execute a caller-selected Ansible playbook and tags.
+
+inputs:
+  playbook:
+    description: Playbook path in the caller repository.
+    required: true
+  inventory:
+    description: Inventory path in the caller repository.
+    required: true
+  tags:
+    description: Comma-separated Ansible tags to run.
+    required: true
+  check_connectivity:
+    description: Ping all inventory hosts before deployment.
+    default: "true"
+  validation_playbooks:
+    description: Space-separated validation playbooks to run before deployment.
+    default: ""
+  validation_scripts:
+    description: Space-separated bash validation scripts to run before deployment.
+    default: ""
+  validation_inventory:
+    description: Inventory used for validation playbooks.
+    default: localhost,
+  working_directory:
+    description: Caller repository directory.
+    default: .
+
+runs:
+  using: composite
+  steps:
+    - name: Check Ansible playbook syntax
+      shell: bash
+      working-directory: ${{ inputs.working_directory }}
+      env:
+        PLAYBOOK_PATH: ${{ inputs.playbook }}
+        INVENTORY_PATH: ${{ inputs.inventory }}
+        EXTRA_VARS_FILE: ${{ runner.temp }}/ansible-extra-vars.json
+      run: |
+        set -euo pipefail
+        test -f "$PLAYBOOK_PATH" || { echo "Playbook not found: $PLAYBOOK_PATH"; exit 1; }
+        test -f "$INVENTORY_PATH" || { echo "Inventory not found: $INVENTORY_PATH"; exit 1; }
+        "$RUNNER_TEMP/ansible-venv/bin/ansible-playbook" \
+          -i "$INVENTORY_PATH" "$PLAYBOOK_PATH" \
+          --syntax-check \
+          --extra-vars "@$EXTRA_VARS_FILE"
+
+    - name: Run validation playbooks
+      if: inputs.validation_playbooks != ''
+      shell: bash
+      working-directory: ${{ inputs.working_directory }}
+      env:
+        VALIDATION_PLAYBOOKS: ${{ inputs.validation_playbooks }}
+        VALIDATION_INVENTORY: ${{ inputs.validation_inventory }}
+        EXTRA_VARS_FILE: ${{ runner.temp }}/ansible-extra-vars.json
+      run: |
+        set -euo pipefail
+        for validation_playbook in $VALIDATION_PLAYBOOKS; do
+          "$RUNNER_TEMP/ansible-venv/bin/ansible-playbook" \
+            -i "$VALIDATION_INVENTORY" "$validation_playbook" \
+            --extra-vars "@$EXTRA_VARS_FILE"
+        done
+
+    - name: Run validation scripts
+      if: inputs.validation_scripts != ''
+      shell: bash
+      working-directory: ${{ inputs.working_directory }}
+      env:
+        VALIDATION_SCRIPTS: ${{ inputs.validation_scripts }}
+      run: |
+        set -euo pipefail
+        for validation_script in $VALIDATION_SCRIPTS; do
+          test -f "$validation_script" || { echo "Validation script not found: $validation_script"; exit 1; }
+          bash "$validation_script"
+        done
+
+    - name: Check inventory connectivity
+      if: inputs.check_connectivity == 'true'
+      shell: bash
+      working-directory: ${{ inputs.working_directory }}
+      env:
+        INVENTORY_PATH: ${{ inputs.inventory }}
+      run: >-
+        "$RUNNER_TEMP/ansible-venv/bin/ansible"
+        -i "$INVENTORY_PATH" all
+        --private-key "$RUNNER_TEMP/id_rsa"
+        -m ping
+
+    - name: Run selected Ansible tags
+      shell: bash
+      working-directory: ${{ inputs.working_directory }}
+      env:
+        PLAYBOOK_PATH: ${{ inputs.playbook }}
+        INVENTORY_PATH: ${{ inputs.inventory }}
+        EXTRA_VARS_FILE: ${{ runner.temp }}/ansible-extra-vars.json
+        ANSIBLE_TAGS: ${{ inputs.tags }}
+      run: |
+        set -euo pipefail
+        tags="${ANSIBLE_TAGS#,}"
+        tags="${tags%,}"
+        test -n "$tags" || { echo "At least one Ansible tag is required."; exit 1; }
+        "$RUNNER_TEMP/ansible-venv/bin/ansible-playbook" \
+          -i "$INVENTORY_PATH" "$PLAYBOOK_PATH" \
+          --private-key "$RUNNER_TEMP/id_rsa" \
+          --extra-vars "@$EXTRA_VARS_FILE" \
+          --tags "$tags"

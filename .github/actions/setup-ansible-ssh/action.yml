@@ -1,0 +1,132 @@
+name: Setup Ansible SSH
+description: Prepare the caller's SSH key, optional Cloudflare Access proxy, inventory, and Ansible variables.
+
+inputs:
+  inventory:
+    description: Inventory path in the caller repository.
+    required: true
+  working_directory:
+    description: Caller repository directory.
+    default: .
+  ssh_private_key:
+    description: SSH private key used by Ansible.
+    required: true
+  ssh_proxy_command:
+    description: Optional ProxyCommand template; use {hostname} for each inventory host.
+    default: ""
+  install_cloudflared:
+    description: Install cloudflared for SSH proxying.
+    default: "false"
+  extra_vars_json:
+    description: JSON object of nonsecret Ansible variables.
+    default: "{}"
+  secret_var_mappings:
+    description: Newline-separated Ansible variable=caller secret name mappings.
+    default: ""
+  caller_secrets_json:
+    description: JSON object containing caller secrets, passed without logging.
+    default: "{}"
+
+runs:
+  using: composite
+  steps:
+    - name: Install cloudflared
+      if: inputs.install_cloudflared == 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        case "$(dpkg --print-architecture)" in
+          amd64) cloudflared_arch=amd64 ;;
+          arm64) cloudflared_arch=arm64 ;;
+          *)
+            echo "Unsupported runner architecture: $(dpkg --print-architecture)"
+            exit 1
+            ;;
+        esac
+        curl --fail --show-error --silent --location \
+          "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${cloudflared_arch}.deb" \
+          --output "$RUNNER_TEMP/cloudflared.deb"
+        sudo dpkg --install "$RUNNER_TEMP/cloudflared.deb"
+        cloudflared --version
+
+    - name: Prepare SSH key, inventory-based SSH config, and Ansible variables
+      shell: bash
+      working-directory: ${{ inputs.working_directory }}
+      env:
+        INVENTORY_PATH: ${{ inputs.inventory }}
+        SSH_PRIVATE_KEY: ${{ inputs.ssh_private_key }}
+        SSH_PROXY_COMMAND: ${{ inputs.ssh_proxy_command }}
+        EXTRA_VARS_JSON: ${{ inputs.extra_vars_json }}
+        SECRET_VAR_MAPPINGS: ${{ inputs.secret_var_mappings }}
+        CALLER_SECRETS_JSON: ${{ inputs.caller_secrets_json }}
+      run: |
+        set -euo pipefail
+        test -f "$INVENTORY_PATH" || { echo "Inventory not found: $INVENTORY_PATH"; exit 1; }
+        "$RUNNER_TEMP/ansible-venv/bin/ansible-inventory" \
+          -i "$INVENTORY_PATH" --list > "$RUNNER_TEMP/inventory.json"
+        install -d -m 700 "$HOME/.ssh"
+        umask 077
+        python - "$RUNNER_TEMP/inventory.json" "$RUNNER_TEMP/ansible-extra-vars.json" "$RUNNER_TEMP/id_rsa" "$HOME/.ssh/config" <<'PY'
+        import json
+        import os
+        import re
+        import sys
+
+        inventory_path, extra_vars_path, private_key_path, ssh_config_path = sys.argv[1:]
+        if not os.environ["SSH_PRIVATE_KEY"]:
+            raise SystemExit("The required SSH private key was not supplied.")
+        with open(private_key_path, "w", encoding="utf-8") as key_file:
+            key_file.write(os.environ["SSH_PRIVATE_KEY"].rstrip() + "\n")
+        os.chmod(private_key_path, 0o600)
+
+        try:
+            extra_vars = json.loads(os.environ["EXTRA_VARS_JSON"] or "{}")
+            caller_secrets = json.loads(os.environ["CALLER_SECRETS_JSON"] or "{}")
+        except json.JSONDecodeError as error:
+            raise SystemExit(f"Invalid JSON input: {error}") from error
+        if not isinstance(extra_vars, dict) or not isinstance(caller_secrets, dict):
+            raise SystemExit("Ansible variables and caller secrets must be JSON objects.")
+
+        for mapping in os.environ["SECRET_VAR_MAPPINGS"].splitlines():
+            mapping = mapping.strip()
+            if not mapping:
+                continue
+            variable_name, separator, secret_name = mapping.partition("=")
+            if not separator or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", variable_name):
+                raise SystemExit(f"Invalid secret variable mapping: {mapping!r}")
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", secret_name):
+                raise SystemExit(f"Invalid caller secret name in mapping: {secret_name!r}")
+            secret_value = caller_secrets.get(secret_name)
+            if not secret_value:
+                raise SystemExit(f"Required caller secret is missing: {secret_name}")
+            extra_vars[variable_name] = secret_value
+
+        with open(extra_vars_path, "w", encoding="utf-8") as vars_file:
+            json.dump(extra_vars, vars_file)
+        os.chmod(extra_vars_path, 0o600)
+
+        proxy_template = os.environ["SSH_PROXY_COMMAND"]
+        if proxy_template:
+            if "\n" in proxy_template or "\r" in proxy_template:
+                raise SystemExit("ssh_proxy_command must be a single line.")
+            with open(inventory_path, encoding="utf-8") as inventory_file:
+                inventory = json.load(inventory_file)
+            hosts = inventory.get("_meta", {}).get("hostvars", {})
+            if not hosts:
+                raise SystemExit("No inventory hosts found for SSH proxy configuration.")
+            config_lines = []
+            for hostname, hostvars in sorted(hosts.items()):
+                ansible_host = str(hostvars.get("ansible_host", hostname))
+                for value in (hostname, ansible_host):
+                    if not re.fullmatch(r"[A-Za-z0-9._:-]+", str(value)):
+                        raise SystemExit(f"Unsupported inventory host value: {value!r}")
+                match_hosts = " ".join(dict.fromkeys((hostname, ansible_host)))
+                config_lines.extend([
+                    f"Host {match_hosts}",
+                    f"  ProxyCommand {proxy_template.replace('{hostname}', hostname)}",
+                    "",
+                ])
+            with open(ssh_config_path, "w", encoding="utf-8") as ssh_config_file:
+                ssh_config_file.write("\n".join(config_lines))
+            os.chmod(ssh_config_path, 0o600)
+        PY

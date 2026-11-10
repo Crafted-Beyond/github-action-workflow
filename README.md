@@ -10,11 +10,14 @@ execution. Callers provide the playbook, inventory, tags, nonsecret variables,
 and newline-separated Ansible-variable-to-secret mappings. They can also select
 collections, requirements, validation playbooks/scripts, and an optional
 dependency checkout. The reusable workflow does not name application roles,
-components, or secrets. Caller workflows retain their own `workflow_dispatch`
-inputs and map those selections to the generic interface. Keep this workflow
+components, or fixed secret names. Caller workflows retain their own
+`workflow_dispatch` inputs, pass their available secrets (for example with
+`secrets: inherit`), and map selected secrets to Ansible variables. Keep this workflow
 `workflow_call`-only so the shared repository does not expose a generic
 deployment button. Publish changes to `main` before callers use
 `Crafted-Beyond/github-action-workflow/.github/workflows/ansible-deploy.yml@main`.
+The workflow is broken into three composite actions under `.github/actions/`:
+`setup-ansible`, `setup-ansible-ssh`, and `run-ansible-playbook`.
 The caller repository must be allowed to access reusable workflows in this
 repository through its Actions settings.
 
