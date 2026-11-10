@@ -1,0 +1,334 @@
+name: CraftedBeyond Ansible runner
+
+on:
+  workflow_call:
+    inputs:
+      playbook:
+        description: Caller repository playbook path
+        type: string
+        required: true
+      inventory:
+        description: Caller repository inventory path
+        type: string
+        required: true
+      tags:
+        description: Comma-separated Ansible tags to run
+        type: string
+        required: true
+      extra_vars_json:
+        description: JSON object of nonsecret Ansible variables
+        type: string
+        required: false
+        default: "{}"
+      secret_var_mappings:
+        description: Newline-separated Ansible variable=caller secret name mappings
+        type: string
+        required: false
+        default: ""
+      validation_playbooks:
+        description: Space-separated validation playbook paths
+        type: string
+        required: false
+        default: ""
+      validation_scripts:
+        description: Space-separated validation script paths, run with bash
+        type: string
+        required: false
+        default: ""
+      validation_inventory:
+        description: Inventory used for validation playbooks
+        type: string
+        required: false
+        default: localhost,
+      ansible_requirements_file:
+        description: Optional requirements file in the caller repository
+        type: string
+        required: false
+        default: ""
+      ansible_collections:
+        description: Comma-separated Ansible collections to install
+        type: string
+        required: false
+        default: community.general
+      python_version:
+        description: Python version used for Ansible
+        type: string
+        required: false
+        default: "3.13"
+      working_directory:
+        description: Working directory in the caller repository
+        type: string
+        required: false
+        default: .
+      install_cloudflared:
+        description: Install cloudflared for SSH proxying
+        type: boolean
+        required: false
+        default: false
+      ssh_private_key_secret_name:
+        description: Name of the inherited secret containing the SSH private key
+        type: string
+        required: false
+        default: ANSIBLE_SSH_PRIVATE_KEY
+      ssh_proxy_command:
+        description: Optional SSH ProxyCommand template; use {hostname} for each inventory host
+        type: string
+        required: false
+        default: ""
+      checkout_repository:
+        description: Optional extra repository to check out into the caller workspace
+        type: string
+        required: false
+        default: ""
+      checkout_ref:
+        description: Ref for the optional extra repository
+        type: string
+        required: false
+        default: main
+      checkout_path:
+        description: Workspace-relative path for the optional extra repository
+        type: string
+        required: false
+        default: .ansible-sources/dependency
+      checkout_token_secret_name:
+        description: Optional inherited secret name used to check out the extra repository
+        type: string
+        required: false
+        default: ""
+      checkout_token_fallback_secret_name:
+        description: Optional fallback inherited secret name for the extra checkout
+        type: string
+        required: false
+        default: ""
+      check_connectivity:
+        description: Ping all inventory hosts before running the playbook
+        type: boolean
+        required: false
+        default: true
+      concurrency_group:
+        description: Shared deployment concurrency group
+        type: string
+        required: false
+        default: ansible-deployment
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ inputs.concurrency_group }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      ANSIBLE_FORCE_COLOR: "1"
+    defaults:
+      run:
+        working-directory: ${{ inputs.working_directory }}
+
+    steps:
+      - name: Check out caller repository
+        uses: actions/checkout@v4
+
+      - name: Check out optional dependency repository
+        if: inputs.checkout_repository != ''
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.checkout_repository }}
+          ref: ${{ inputs.checkout_ref }}
+          path: ${{ inputs.checkout_path }}
+          token: ${{ (inputs.checkout_token_secret_name != '' && secrets[inputs.checkout_token_secret_name]) || (inputs.checkout_token_fallback_secret_name != '' && secrets[inputs.checkout_token_fallback_secret_name]) || github.token }}
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python_version }}
+
+      - name: Install Ansible dependencies
+        env:
+          ANSIBLE_REQUIREMENTS_FILE: ${{ inputs.ansible_requirements_file }}
+          ANSIBLE_COLLECTIONS: ${{ inputs.ansible_collections }}
+        run: |
+          set -euo pipefail
+          python -m venv "$RUNNER_TEMP/ansible-venv"
+          "$RUNNER_TEMP/ansible-venv/bin/pip" install ansible jmespath
+          if [ -n "$ANSIBLE_REQUIREMENTS_FILE" ]; then
+            test -f "$ANSIBLE_REQUIREMENTS_FILE" || { echo "Ansible requirements file not found: $ANSIBLE_REQUIREMENTS_FILE"; exit 1; }
+            "$RUNNER_TEMP/ansible-venv/bin/pip" install -r "$ANSIBLE_REQUIREMENTS_FILE"
+          fi
+          if [ -n "$ANSIBLE_COLLECTIONS" ]; then
+            IFS=',' read -r -a collections <<< "$ANSIBLE_COLLECTIONS"
+            "$RUNNER_TEMP/ansible-venv/bin/ansible-galaxy" collection install "${collections[@]}"
+          fi
+
+      - name: Install cloudflared
+        if: inputs.install_cloudflared
+        run: |
+          set -euo pipefail
+          case "$(dpkg --print-architecture)" in
+            amd64) cloudflared_arch=amd64 ;;
+            arm64) cloudflared_arch=arm64 ;;
+            *)
+              echo "Unsupported runner architecture: $(dpkg --print-architecture)"
+              exit 1
+              ;;
+          esac
+          curl --fail --show-error --silent --location \
+            "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${cloudflared_arch}.deb" \
+            --output "$RUNNER_TEMP/cloudflared.deb"
+          sudo dpkg --install "$RUNNER_TEMP/cloudflared.deb"
+          cloudflared --version
+
+      - name: Prepare SSH and Ansible variables
+        env:
+          CALLER_SECRETS_JSON: ${{ toJSON(secrets) }}
+          SSH_PRIVATE_KEY_SECRET_NAME: ${{ inputs.ssh_private_key_secret_name }}
+          SSH_PROXY_COMMAND: ${{ inputs.ssh_proxy_command }}
+          INVENTORY_PATH: ${{ inputs.inventory }}
+          EXTRA_VARS_JSON: ${{ inputs.extra_vars_json }}
+          SECRET_VAR_MAPPINGS: ${{ inputs.secret_var_mappings }}
+        run: |
+          set -euo pipefail
+          test -f "$INVENTORY_PATH" || { echo "Inventory not found: $INVENTORY_PATH"; exit 1; }
+          "$RUNNER_TEMP/ansible-venv/bin/ansible-inventory" \
+            -i "$INVENTORY_PATH" --list > "$RUNNER_TEMP/inventory.json"
+          umask 077
+          python - "$RUNNER_TEMP/inventory.json" "$RUNNER_TEMP/ansible-extra-vars.json" "$RUNNER_TEMP/id_rsa" "$HOME/.ssh/config" <<'PY'
+          import json
+          import os
+          import re
+          import sys
+
+          inventory_path, extra_vars_path, private_key_path, ssh_config_path = sys.argv[1:]
+          caller_secrets = json.loads(os.environ["CALLER_SECRETS_JSON"])
+          ssh_key_name = os.environ["SSH_PRIVATE_KEY_SECRET_NAME"]
+          private_key = caller_secrets.get(ssh_key_name)
+          if not private_key:
+              raise SystemExit(f"Required SSH secret is missing: {ssh_key_name}")
+          with open(private_key_path, "w", encoding="utf-8") as key_file:
+              key_file.write(private_key.rstrip() + "\n")
+          os.chmod(private_key_path, 0o600)
+
+          try:
+              extra_vars = json.loads(os.environ["EXTRA_VARS_JSON"] or "{}")
+          except json.JSONDecodeError as error:
+              raise SystemExit(f"extra_vars_json is not valid JSON: {error}") from error
+          if not isinstance(extra_vars, dict):
+              raise SystemExit("extra_vars_json must be a JSON object.")
+
+          for mapping in os.environ["SECRET_VAR_MAPPINGS"].splitlines():
+              mapping = mapping.strip()
+              if not mapping:
+                  continue
+              variable_name, separator, secret_name = mapping.partition("=")
+              if not separator or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", variable_name):
+                  raise SystemExit(f"Invalid secret variable mapping: {mapping!r}")
+              if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", secret_name):
+                  raise SystemExit(f"Invalid caller secret name in mapping: {secret_name!r}")
+              secret_value = caller_secrets.get(secret_name)
+              if not secret_value:
+                  raise SystemExit(f"Required caller secret is missing: {secret_name}")
+              extra_vars[variable_name] = secret_value
+
+          with open(extra_vars_path, "w", encoding="utf-8") as vars_file:
+              json.dump(extra_vars, vars_file)
+          os.chmod(extra_vars_path, 0o600)
+
+          proxy_template = os.environ["SSH_PROXY_COMMAND"]
+          if proxy_template:
+              if "\n" in proxy_template or "\r" in proxy_template:
+                  raise SystemExit("ssh_proxy_command must be a single line.")
+              with open(inventory_path, encoding="utf-8") as inventory_file:
+                  inventory = json.load(inventory_file)
+              hosts = inventory.get("_meta", {}).get("hostvars", {})
+              if not hosts:
+                  raise SystemExit("No inventory hosts found for SSH proxy configuration.")
+              config_lines = []
+              for hostname, hostvars in sorted(hosts.items()):
+                  ansible_host = str(hostvars.get("ansible_host", hostname))
+                  for value in (hostname, ansible_host):
+                      if not re.fullmatch(r"[A-Za-z0-9._:-]+", str(value)):
+                          raise SystemExit(f"Unsupported inventory host value: {value!r}")
+                  match_hosts = " ".join(dict.fromkeys((hostname, ansible_host)))
+                  config_lines.extend([
+                      f"Host {match_hosts}",
+                      f"  ProxyCommand {proxy_template.replace('{hostname}', hostname)}",
+                      "",
+                  ])
+              os.makedirs(os.path.dirname(ssh_config_path), mode=0o700, exist_ok=True)
+              with open(ssh_config_path, "w", encoding="utf-8") as ssh_config_file:
+                  ssh_config_file.write("\n".join(config_lines))
+              os.chmod(ssh_config_path, 0o600)
+          PY
+
+      - name: Check Ansible playbook syntax
+        env:
+          PLAYBOOK_PATH: ${{ inputs.playbook }}
+          INVENTORY_PATH: ${{ inputs.inventory }}
+        run: |
+          set -euo pipefail
+          test -f "$PLAYBOOK_PATH" || { echo "Playbook not found: $PLAYBOOK_PATH"; exit 1; }
+          "$RUNNER_TEMP/ansible-venv/bin/ansible-playbook" \
+            -i "$INVENTORY_PATH" "$PLAYBOOK_PATH" \
+            --syntax-check \
+            --extra-vars "@$RUNNER_TEMP/ansible-extra-vars.json"
+
+      - name: Run validation playbooks
+        if: inputs.validation_playbooks != ''
+        env:
+          VALIDATION_PLAYBOOKS: ${{ inputs.validation_playbooks }}
+          VALIDATION_INVENTORY: ${{ inputs.validation_inventory }}
+        run: |
+          set -euo pipefail
+          for validation_playbook in $VALIDATION_PLAYBOOKS; do
+            "$RUNNER_TEMP/ansible-venv/bin/ansible-playbook" \
+              -i "$VALIDATION_INVENTORY" "$validation_playbook" \
+              --extra-vars "@$RUNNER_TEMP/ansible-extra-vars.json"
+          done
+
+      - name: Run validation scripts
+        if: inputs.validation_scripts != ''
+        env:
+          VALIDATION_SCRIPTS: ${{ inputs.validation_scripts }}
+        run: |
+          set -euo pipefail
+          for validation_script in $VALIDATION_SCRIPTS; do
+            test -f "$validation_script" || { echo "Validation script not found: $validation_script"; exit 1; }
+            bash "$validation_script"
+          done
+
+      - name: Check inventory connectivity
+        if: inputs.check_connectivity
+        env:
+          INVENTORY_PATH: ${{ inputs.inventory }}
+        run: >-
+          "$RUNNER_TEMP/ansible-venv/bin/ansible"
+          -i "$INVENTORY_PATH" all
+          --private-key "$RUNNER_TEMP/id_rsa"
+          -m ping
+
+      - name: Run Ansible playbook
+        env:
+          PLAYBOOK_PATH: ${{ inputs.playbook }}
+          INVENTORY_PATH: ${{ inputs.inventory }}
+          ANSIBLE_TAGS: ${{ inputs.tags }}
+        run: |
+          set -euo pipefail
+          tags="${ANSIBLE_TAGS#,}"
+          tags="${tags%,}"
+          test -n "$tags" || { echo "At least one Ansible tag is required."; exit 1; }
+          "$RUNNER_TEMP/ansible-venv/bin/ansible-playbook" \
+            -i "$INVENTORY_PATH" "$PLAYBOOK_PATH" \
+            --private-key "$RUNNER_TEMP/id_rsa" \
+            --extra-vars "@$RUNNER_TEMP/ansible-extra-vars.json" \
+            --tags "$tags"
+
+      - name: Remove temporary credentials
+        if: always()
+        run: |
+          rm -f "$RUNNER_TEMP/id_rsa" "$RUNNER_TEMP/inventory.json" \
+            "$RUNNER_TEMP/ansible-extra-vars.json" "$RUNNER_TEMP/cloudflared.deb" \
+            "$HOME/.ssh/config"

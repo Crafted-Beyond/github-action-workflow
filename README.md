@@ -2,6 +2,22 @@
 
 GitHub Actions workflow repository.
 
+## Reusable Ansible deployment
+
+`.github/workflows/ansible-deploy.yml` centralizes Ansible runner setup,
+optional SSH proxy setup, selected secret preparation, validation, and playbook
+execution. Callers provide the playbook, inventory, tags, nonsecret variables,
+and newline-separated Ansible-variable-to-secret mappings. They can also select
+collections, requirements, validation playbooks/scripts, and an optional
+dependency checkout. The reusable workflow does not name application roles,
+components, or secrets. Caller workflows retain their own `workflow_dispatch`
+inputs and map those selections to the generic interface. Keep this workflow
+`workflow_call`-only so the shared repository does not expose a generic
+deployment button. Publish changes to `main` before callers use
+`Crafted-Beyond/github-action-workflow/.github/workflows/ansible-deploy.yml@main`.
+The caller repository must be allowed to access reusable workflows in this
+repository through its Actions settings.
+
 ## Manual Plan / Apply controls
 
 Application callers can expose an `action` choice (`plan` or `apply`) under
