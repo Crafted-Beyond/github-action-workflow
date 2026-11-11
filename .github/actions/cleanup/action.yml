@@ -31,6 +31,7 @@ runs:
         rm -f "$WORKDIR"/terraform.tfstate "$WORKDIR"/terraform.tfstate.backup "$WORKDIR"/tfplan "$WORKDIR"/crash.log
         rm -rf "$WORKDIR"/.terraform
         rm -f "$RUNNER_TEMP"/tofu-plan.* "$RUNNER_TEMP"/tofu-apply.*
+        rm -f "$RUNNER_TEMP"/tofu-gitconfig
 
         # Credential leftovers a git step may have written.
         rm -f "$HOME/.git-credentials" 2>/dev/null || true

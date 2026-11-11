@@ -1,0 +1,24 @@
+name: Configure Git for private modules
+description: Configure temporary GitHub authentication for private Git-sourced Terraform modules.
+
+inputs:
+  token:
+    description: GitHub token with read access to private Terraform module repositories.
+    required: false
+
+runs:
+  using: composite
+  steps:
+    - name: Configure Git authentication
+      if: ${{ inputs.token != '' }}
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+      run: |
+        set -euo pipefail
+        config="$RUNNER_TEMP/tofu-gitconfig"
+        umask 077
+        : > "$config"
+        encoded="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')"
+        git config --file "$config" "http.${GITHUB_SERVER_URL}/.extraheader" "AUTHORIZATION: basic $encoded"
+        printf 'GIT_CONFIG_GLOBAL=%s\n' "$config" >> "$GITHUB_ENV"

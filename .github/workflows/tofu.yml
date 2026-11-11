@@ -107,6 +107,11 @@ jobs:
             ${{ secrets.tofu_env }}
             ${{ inputs.github_token_env != '' && format('{0}={1}', inputs.github_token_env, secrets.GH_TOKEN) || '' }}
 
+      - name: Configure Git for private Terraform modules
+        uses: Crafted-Beyond/github-action-workflow/.github/actions/git-module-auth@main
+        with:
+          token: ${{ secrets.GH_TOKEN }}
+
       - name: Write Kubeconfig (masked)
         if: ${{ env.HAS_KUBECONFIG == 'true' }}
         shell: bash
@@ -193,6 +198,11 @@ jobs:
           env: |
             ${{ secrets.tofu_env }}
             ${{ inputs.github_token_env != '' && format('{0}={1}', inputs.github_token_env, secrets.GH_TOKEN) || '' }}
+
+      - name: Configure Git for private Terraform modules
+        uses: Crafted-Beyond/github-action-workflow/.github/actions/git-module-auth@main
+        with:
+          token: ${{ secrets.GH_TOKEN }}
 
       - name: Write Kubeconfig (masked)
         if: ${{ env.HAS_KUBECONFIG == 'true' }}
