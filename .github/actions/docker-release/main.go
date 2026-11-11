@@ -1771,7 +1771,7 @@ func (c *controller) deploymentComplete() error {
 		return err
 	}
 	healthy, resynced := false, false
-	for attempt := 0; attempt < 120; attempt++ {
+	for attempt := 0; attempt < 60; attempt++ {
 		data, err := kubectl("-n", namespace, "get", "application", name, "-o", "json")
 		if err != nil {
 			return err
@@ -1817,7 +1817,7 @@ func (c *controller) deploymentComplete() error {
 		time.Sleep(10 * time.Second)
 	}
 	if !healthy {
-		return errors.New("Argo CD and its public route did not become synced, healthy and ready within 20 minutes")
+		return errors.New("Argo CD and its public route did not become synced, healthy and ready within 10 minutes")
 	}
 	return output("healthy", "true")
 }
