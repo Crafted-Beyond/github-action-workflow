@@ -82,3 +82,25 @@ func TestFailedRunOnlyAllowsCompletedFailures(t *testing.T) {
 		})
 	}
 }
+
+func TestSameRepositoryHeadAllowsDeletedBranchPayload(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		repo  string
+		label string
+		want  bool
+	}{
+		{"repository object", "owner/repo", "", true},
+		{"deleted branch with same-repository label", "", "owner/repo:fix", true},
+		{"deleted branch from fork", "", "contributor/repo:fix", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			pr := pullRequest{}
+			pr.Head.Repo.FullName = test.repo
+			pr.Head.Label = test.label
+			if got := sameRepositoryHead(pr, "owner/repo"); got != test.want {
+				t.Fatalf("sameRepositoryHead() = %t, want %t", got, test.want)
+			}
+		})
+	}
+}

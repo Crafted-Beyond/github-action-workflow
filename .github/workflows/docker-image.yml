@@ -265,7 +265,7 @@ jobs:
           operation: build-cleanup
 
   recover-release:
-    name: Recover failed release lock
+    name: Release lock recovery (no image build)
     if: >-
       github.event_name == 'issue_comment' && github.event.action == 'created' &&
       github.event.issue.pull_request && startsWith(github.event.comment.body, '/recover-release-pr')
@@ -281,13 +281,9 @@ jobs:
       GH_TOKEN: ${{ secrets.GH_TOKEN }}
       IMAGE_REPOSITORY: ${{ inputs.image }}
       IMAGE_REGISTRY: ${{ inputs.registry }}
-      REGISTRY_ADAPTER: ${{ inputs.registry_adapter }}
-      REGISTRY_CLEANUP_SCRIPT: ${{ inputs.registry_cleanup_script }}
-      REGISTRY_USERNAME: ${{ secrets.registry_username }}
-      REGISTRY_PASSWORD: ${{ secrets.registry_password }}
       RELEASE_BRANCH: ${{ inputs.release_branch }}
     steps:
-      - name: Validate recovery request and clear failed release lock
+      - name: Validate recovery request and clear lock only
         uses: Crafted-Beyond/github-action-workflow/.github/actions/docker-release@main
         with:
-          operation: prepare
+          operation: recover-lock

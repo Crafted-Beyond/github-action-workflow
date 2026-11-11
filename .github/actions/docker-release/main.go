@@ -38,8 +38,9 @@ type pullRequest struct {
 	MergeCommitSHA string  `json:"merge_commit_sha"`
 	Labels         []label `json:"labels"`
 	Head           struct {
-		SHA  string `json:"sha"`
-		Repo struct {
+		SHA   string `json:"sha"`
+		Label string `json:"label"`
+		Repo  struct {
 			FullName string `json:"full_name"`
 		} `json:"repo"`
 	} `json:"head"`
@@ -255,6 +256,13 @@ func hasLabel(pr pullRequest, name string) bool {
 		}
 	}
 	return false
+}
+
+func sameRepositoryHead(pr pullRequest, repository string) bool {
+	if pr.Head.Repo.FullName != "" {
+		return pr.Head.Repo.FullName == repository
+	}
+	return strings.HasPrefix(pr.Head.Label, repository+":")
 }
 
 func prTag(number int, sha string) string {
@@ -744,9 +752,14 @@ func (c *controller) prepareRecovery(fixPR pullRequest, releasePRNumber int) err
 	if releasePRNumber == fixPR.Number {
 		return errors.New("recovery PR must differ from the failed release PR")
 	}
-	if !fixPR.Merged || fixPR.MergeCommitSHA == "" || fixPR.Base.Ref != os.Getenv("RELEASE_BRANCH") ||
-		fixPR.Head.Repo.FullName != c.event.Repository.FullName {
-		return errors.New("recovery must run from a merged same-repository fix PR targeting the release branch")
+	if !fixPR.Merged || fixPR.MergeCommitSHA == "" {
+		return errors.New("recovery must run from a merged fix PR")
+	}
+	if fixPR.Base.Ref != os.Getenv("RELEASE_BRANCH") {
+		return errors.New("recovery fix PR must target the release branch")
+	}
+	if !sameRepositoryHead(fixPR, c.event.Repository.FullName) {
+		return errors.New("recovery fix PR must come from the same repository")
 	}
 	if !shaPattern.MatchString(fixPR.MergeCommitSHA) {
 		return errors.New("recovery PR has an invalid merge SHA")
@@ -960,11 +973,6 @@ func (c *controller) prepare() error {
 	pr, err := c.pr()
 	if err != nil {
 		return err
-	}
-	if releasePRNumber, recovery, err := recoveryTarget(command); err != nil {
-		return err
-	} else if recovery {
-		return c.prepareRecovery(pr, releasePRNumber)
 	}
 	label, err := selectedLabel(pr.Labels)
 	if err != nil {
@@ -2048,8 +2056,9 @@ func buildCleanup() error {
 
 func run() error {
 	if len(os.Args) != 2 {
-		return errors.New("usage: docker-release prepare|preflight|finalize|unlock|deployment-prepare|deployment-lock|deployment-complete|report")
+		return errors.New("usage: docker-release prepare|recover-lock|preflight|finalize|unlock|deployment-prepare|deployment-lock|deployment-complete|report")
 	}
+	recoveryOnly := os.Args[1] == "recover-lock"
 	if os.Args[1] == "deployment-cleanup" {
 		return deploymentCleanup()
 	}
@@ -2071,20 +2080,26 @@ func run() error {
 		!regexp.MustCompile(`^[a-z0-9]+([._-][a-z0-9]+)*(/[a-z0-9]+([._-][a-z0-9]+)*)+$`).MatchString(c.image) {
 		return errors.New("invalid registry hostname or lowercase namespace/repository image path")
 	}
-	switch c.adapter {
-	case "dockerhub":
-		if c.registry != "docker.io" || len(strings.Split(c.image, "/")) != 2 {
-			return errors.New("Docker Hub requires docker.io and namespace/repository; other registries need a custom adapter")
+	if recoveryOnly {
+		if c.token == "" {
+			return errors.New("GitHub credentials are required for lock recovery")
 		}
-	case "custom":
-		if os.Getenv("REGISTRY_CLEANUP_SCRIPT") == "" {
-			return errors.New("custom registry requires a trusted Go registry_cleanup_script")
+	} else {
+		switch c.adapter {
+		case "dockerhub":
+			if c.registry != "docker.io" || len(strings.Split(c.image, "/")) != 2 {
+				return errors.New("Docker Hub requires docker.io and namespace/repository; other registries need a custom adapter")
+			}
+		case "custom":
+			if os.Getenv("REGISTRY_CLEANUP_SCRIPT") == "" {
+				return errors.New("custom registry requires a trusted Go registry_cleanup_script")
+			}
+		default:
+			return errors.New("registry_adapter must be dockerhub or custom")
 		}
-	default:
-		return errors.New("registry_adapter must be dockerhub or custom")
-	}
-	if os.Getenv("REGISTRY_USERNAME") == "" || os.Getenv("REGISTRY_PASSWORD") == "" || c.token == "" {
-		return errors.New("GitHub and registry credentials are required")
+		if os.Getenv("REGISTRY_USERNAME") == "" || os.Getenv("REGISTRY_PASSWORD") == "" || c.token == "" {
+			return errors.New("GitHub and registry credentials are required")
+		}
 	}
 	data, err := os.ReadFile(os.Getenv("GITHUB_EVENT_PATH"))
 	if err != nil {
@@ -2111,6 +2126,26 @@ func run() error {
 		return errors.New("unsupported workflow event")
 	}
 	switch os.Args[1] {
+	case "recover-lock":
+		if os.Getenv("GITHUB_EVENT_NAME") != "issue_comment" {
+			return errors.New("lock recovery is only available from a pull request comment")
+		}
+		command, err := c.command()
+		if err != nil {
+			return err
+		}
+		releasePRNumber, found, err := recoveryTarget(command)
+		if err != nil {
+			return err
+		}
+		if !found {
+			return c.note("Recovery skipped: use the exact form /recover-release-pr<N>.")
+		}
+		fixPR, err := c.pr()
+		if err != nil {
+			return err
+		}
+		return c.prepareRecovery(fixPR, releasePRNumber)
 	case "prepare":
 		err := c.prepare()
 		if err != nil {
