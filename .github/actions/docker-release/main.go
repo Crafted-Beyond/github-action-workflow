@@ -750,10 +750,10 @@ func (c *controller) versionFor(pr pullRequest, label string, recoveryPR int) (s
 
 func (c *controller) prepareRecovery(fixPR pullRequest, releasePRNumber int) error {
 	if releasePRNumber == fixPR.Number {
-		return errors.New("recovery PR must differ from the failed release PR")
+		return c.note("Recovery skipped: the fix PR must be different from the failed release PR. No image was built and no lock was changed.")
 	}
 	if fixPR.State != "open" && !fixPR.Merged {
-		return errors.New("recovery requires an open fix PR or a merged fix PR")
+		return c.note("Recovery skipped: the fix PR is closed without a merge. No image was built and no lock was changed.")
 	}
 	if fixPR.Base.Ref != os.Getenv("RELEASE_BRANCH") {
 		return errors.New("recovery fix PR must target the release branch")
@@ -980,15 +980,15 @@ func (c *controller) prepare() error {
 	if err != nil {
 		return err
 	}
+	if !release && pr.State != "open" {
+		return c.note("Release command ignored: this PR is already closed; merged PR releases are triggered automatically. No image was built.")
+	}
 	label, err := selectedLabel(pr.Labels)
 	if err != nil {
 		return err
 	}
 	if pr.Head.Repo.FullName != c.event.Repository.FullName || pr.Base.Ref != os.Getenv("RELEASE_BRANCH") {
 		return errors.New("only same-repository PRs targeting the configured release branch are supported")
-	}
-	if !release && pr.State != "open" {
-		return errors.New("PR commands require an open PR; deploy released versions using the manual environment workflow")
 	}
 	if label == "" {
 		if command != "" || hasLabel(pr, "combine-deploy") {
