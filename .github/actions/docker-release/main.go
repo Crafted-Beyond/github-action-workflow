@@ -752,8 +752,8 @@ func (c *controller) prepareRecovery(fixPR pullRequest, releasePRNumber int) err
 	if releasePRNumber == fixPR.Number {
 		return errors.New("recovery PR must differ from the failed release PR")
 	}
-	if !fixPR.Merged || fixPR.MergeCommitSHA == "" {
-		return errors.New("recovery must run from a merged fix PR")
+	if fixPR.State != "open" && !fixPR.Merged {
+		return errors.New("recovery requires an open fix PR or a merged fix PR")
 	}
 	if fixPR.Base.Ref != os.Getenv("RELEASE_BRANCH") {
 		return errors.New("recovery fix PR must target the release branch")
@@ -761,8 +761,12 @@ func (c *controller) prepareRecovery(fixPR pullRequest, releasePRNumber int) err
 	if !sameRepositoryHead(fixPR, c.event.Repository.FullName) {
 		return errors.New("recovery fix PR must come from the same repository")
 	}
-	if !shaPattern.MatchString(fixPR.MergeCommitSHA) {
-		return errors.New("recovery PR has an invalid merge SHA")
+	fixSHA := fixPR.Head.SHA
+	if fixPR.Merged {
+		fixSHA = fixPR.MergeCommitSHA
+	}
+	if !shaPattern.MatchString(fixSHA) {
+		return errors.New("recovery PR has an invalid source SHA")
 	}
 	releasePR, err := c.pullRequest(releasePRNumber)
 	if err != nil {
@@ -785,27 +789,29 @@ func (c *controller) prepareRecovery(fixPR pullRequest, releasePRNumber int) err
 	if fixLabel != label {
 		return errors.New("fix PR must have the same major, minor or patch label as the failed PR")
 	}
-	includesRelease, err := c.ancestor(releasePR.MergeCommitSHA, fixPR.MergeCommitSHA)
+	includesRelease, err := c.ancestor(releasePR.MergeCommitSHA, fixSHA)
 	if err != nil {
 		return err
 	}
 	if !includesRelease {
-		return errors.New("fix PR merge commit does not contain the failed release commit")
+		return errors.New("fix PR source does not contain the failed release commit")
 	}
-	var branch struct{ Commit struct{ SHA string } }
-	status, err := c.github("GET", "/branches/"+url.PathEscape(os.Getenv("RELEASE_BRANCH")), nil, &branch)
-	if err != nil {
-		return err
-	}
-	if status == http.StatusNotFound || branch.Commit.SHA == "" {
-		return errors.New("release branch not found")
-	}
-	onReleaseBranch, err := c.ancestor(fixPR.MergeCommitSHA, branch.Commit.SHA)
-	if err != nil {
-		return err
-	}
-	if !onReleaseBranch {
-		return errors.New("recovery merge commit is not on the release branch")
+	if fixPR.Merged {
+		var branch struct{ Commit struct{ SHA string } }
+		status, err := c.github("GET", "/branches/"+url.PathEscape(os.Getenv("RELEASE_BRANCH")), nil, &branch)
+		if err != nil {
+			return err
+		}
+		if status == http.StatusNotFound || branch.Commit.SHA == "" {
+			return errors.New("release branch not found")
+		}
+		onReleaseBranch, err := c.ancestor(fixSHA, branch.Commit.SHA)
+		if err != nil {
+			return err
+		}
+		if !onReleaseBranch {
+			return errors.New("recovery merge commit is not on the release branch")
+		}
 	}
 	lock, err := c.ref(c.lockName())
 	if err != nil {

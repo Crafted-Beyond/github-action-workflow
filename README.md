@@ -330,14 +330,16 @@ The label on a merged PR must still match the single label captured in the merge
 event; changing labels afterward is rejected.
 
 If the merged release commit contains a code defect that requires a follow-up
-fix PR, add the **same** `major`, `minor` or `patch` label to the fix PR, merge
-it, then comment `/recover-release-pr<N>` on that merged fix PR, replacing `N`
-with the failed release PR number. For example, `/recover-release-pr123` recovers
-the lock for release PR 123. The command only removes a verified stale lock; it
-does not build or publish any image. The fix PR's normal merged-release job then
-continues and builds its versioned image. Recovery runs in a separate concurrency
-group so it can clear the lock while that release job waits. If no merged-release
-job is waiting, rerun that fix PR's merged workflow after the lock is cleared.
+fix PR, update the fix branch from the release branch, add the **same** `major`,
+`minor` or `patch` label as the failed PR, then comment
+`/recover-release-pr<N>` on the fix PR, replacing `N` with the failed release
+PR number. For example, `/recover-release-pr123` recovers the lock for release
+PR 123. The fix PR may still be open; its head must contain the failed release
+commit. The command only removes a verified stale lock; it does not build or
+publish any image. Merge the fix PR afterward. Its normal merged-release job
+then builds the versioned image. Recovery runs in a separate concurrency group
+so it can clear the lock while the release job waits. If no release job is
+waiting after the lock is cleared, rerun the fix PR's merged workflow.
 
 Recovery is skipped without changing the lock if the lock is absent, belongs to
 another release, the failed run is still active or succeeded, the fix commit does
