@@ -18,6 +18,7 @@ import (
 	"reflect"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -83,10 +84,12 @@ type gitTag struct {
 }
 
 type ownership struct {
-	Run   string `json:"run"`
-	PR    int    `json:"pr"`
-	Image string `json:"image"`
-	Mode  string `json:"mode"`
+	Run        string `json:"run"`
+	PR         int    `json:"pr"`
+	Image      string `json:"image"`
+	Mode       string `json:"mode"`
+	RecoveryPR int    `json:"recovery_pr,omitempty"`
+	Label      string `json:"label,omitempty"`
 }
 
 type releaseRecord struct {
@@ -95,22 +98,32 @@ type releaseRecord struct {
 	PR         int    `json:"pr"`
 	SHA        string `json:"sha"`
 	Digest     string `json:"digest"`
+	RecoveryPR int    `json:"recovery_pr,omitempty"`
+}
+
+type recoveryRequest struct {
+	ReleasePR  int
+	RecoveryPR int
+	Label      string
 }
 
 type controller struct {
-	event    event
-	registry string
-	image    string
-	adapter  string
-	api      string
-	token    string
-	client   *http.Client
+	event        event
+	registry     string
+	image        string
+	adapter      string
+	api          string
+	token        string
+	client       *http.Client
+	recovery     *recoveryRequest
+	releaseLabel string
 }
 
 var (
-	shaPattern     = regexp.MustCompile(`^[a-f0-9]{40}$`)
-	digestPattern  = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
-	versionPattern = regexp.MustCompile(`^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
+	shaPattern             = regexp.MustCompile(`^[a-f0-9]{40}$`)
+	digestPattern          = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
+	versionPattern         = regexp.MustCompile(`^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
+	recoveryCommandPattern = regexp.MustCompile(`^/recover-release-pr([1-9][0-9]*)$`)
 )
 
 func selectedLabel(labels []label) (string, error) {
@@ -223,8 +236,12 @@ func (c *controller) github(method, endpoint string, body, result any) (int, err
 }
 
 func (c *controller) pr() (pullRequest, error) {
+	return c.pullRequest(c.event.PullRequest.Number)
+}
+
+func (c *controller) pullRequest(number int) (pullRequest, error) {
 	var result pullRequest
-	status, err := c.github("GET", fmt.Sprintf("/pulls/%d", c.event.PullRequest.Number), nil, &result)
+	status, err := c.github("GET", fmt.Sprintf("/pulls/%d", number), nil, &result)
 	if err == nil && status == 404 {
 		err = errors.New("pull request not found")
 	}
@@ -289,7 +306,9 @@ func (c *controller) command() (string, error) {
 	switch command {
 	case "/major", "/minor", "/patch", "/combine-deploy":
 	default:
-		return "", nil
+		if !recoveryCommandPattern.MatchString(command) {
+			return "", nil
+		}
 	}
 	var comment struct {
 		Body string `json:"body"`
@@ -315,6 +334,18 @@ func (c *controller) command() (string, error) {
 		return "", errors.New("only repository writers, maintainers or administrators may trigger this command")
 	}
 	return command, nil
+}
+
+func recoveryTarget(command string) (int, bool, error) {
+	match := recoveryCommandPattern.FindStringSubmatch(command)
+	if match == nil {
+		return 0, false, nil
+	}
+	number, err := strconv.Atoi(match[1])
+	if err != nil || number < 1 {
+		return 0, true, errors.New("recovery command requires a valid failed PR number")
+	}
+	return number, true, nil
 }
 
 func (c *controller) lockName() string {
@@ -355,6 +386,45 @@ func (c *controller) owner(ref *gitRef) (ownership, error) {
 	return result, nil
 }
 
+func (c *controller) failedRun(runID string) (bool, error) {
+	if runID == "" {
+		return false, errors.New("release lock has no owning workflow run")
+	}
+	var result struct {
+		Status     string `json:"status"`
+		Conclusion string `json:"conclusion"`
+	}
+	status, err := c.github("GET", "/actions/runs/"+url.PathEscape(runID), nil, &result)
+	if err != nil {
+		return false, err
+	}
+	if status == http.StatusNotFound {
+		return false, errors.New("release lock owner run was not found")
+	}
+	if result.Status != "completed" {
+		return false, nil
+	}
+	switch result.Conclusion {
+	case "failure", "cancelled", "timed_out", "action_required", "startup_failure":
+		return true, nil
+	default:
+		return false, nil
+	}
+}
+
+func (c *controller) takeOverRecoveryLock(owner ownership, sha string) error {
+	message, err := json.Marshal(owner)
+	if err != nil {
+		return err
+	}
+	tagSHA, err := c.createTag(c.lockName(), sha, string(message))
+	if err != nil {
+		return err
+	}
+	_, err = c.github("PATCH", "/git/refs/tags/"+c.lockName(), map[string]any{"sha": tagSHA, "force": true}, nil)
+	return err
+}
+
 func (c *controller) createTag(name, sha, message string) (string, error) {
 	var result gitTag
 	_, err := c.github("POST", "/git/tags", map[string]string{
@@ -367,6 +437,43 @@ func (c *controller) createTag(name, sha, message string) (string, error) {
 }
 
 func (c *controller) acquire(sha, mode string) error {
+	if mode == "recovery" {
+		if c.recovery == nil {
+			return errors.New("recovery metadata is missing")
+		}
+		ref, err := c.ref(c.lockName())
+		if err != nil {
+			return err
+		}
+		if ref == nil {
+			return errors.New("failed release lock is missing; nothing can be recovered")
+		}
+		held, err := c.owner(ref)
+		if err != nil {
+			return err
+		}
+		validReleaseLock := held.Mode == "release" && held.PR == c.recovery.ReleasePR &&
+			held.Image == c.registry+"/"+c.image && (held.Label == "" || held.Label == c.recovery.Label)
+		validRecoveryRetry := held.Mode == "recovery" && held.PR == c.recovery.ReleasePR &&
+			held.RecoveryPR == c.recovery.RecoveryPR && held.Label == c.recovery.Label &&
+			held.Image == c.registry+"/"+c.image
+		if !validReleaseLock && !validRecoveryRetry {
+			return errors.New("publication lock does not belong to this failed release request")
+		}
+		failed, err := c.failedRun(held.Run)
+		if err != nil {
+			return err
+		}
+		if !failed {
+			return errors.New("publication lock owner is not a failed run")
+		}
+		recoveryOwner := ownership{
+			Run: os.Getenv("GITHUB_RUN_ID"), PR: c.recovery.ReleasePR,
+			Image: c.registry + "/" + c.image, Mode: "recovery",
+			RecoveryPR: c.recovery.RecoveryPR, Label: c.recovery.Label,
+		}
+		return c.takeOverRecoveryLock(recoveryOwner, sha)
+	}
 	if mode == "pr" || (mode == "deployment" && os.Getenv("BUILD_PREVIEW") == "true") {
 		ref, err := c.ref(c.lockName())
 		if err != nil {
@@ -378,7 +485,10 @@ func (c *controller) acquire(sha, mode string) error {
 		fmt.Println("PR operations are serialized by GitHub Actions concurrency; no Git tag created.")
 		return nil
 	}
-	record := ownership{os.Getenv("GITHUB_RUN_ID"), c.event.PullRequest.Number, c.registry + "/" + c.image, mode}
+	record := ownership{
+		Run: os.Getenv("GITHUB_RUN_ID"), PR: c.event.PullRequest.Number,
+		Image: c.registry + "/" + c.image, Mode: mode, Label: c.releaseLabel,
+	}
 	message, err := json.Marshal(record)
 	if err != nil {
 		return err
@@ -435,8 +545,8 @@ func (c *controller) unlock() error {
 	if owner.Run != os.Getenv("GITHUB_RUN_ID") || owner.Image != c.registry+"/"+c.image {
 		return nil
 	}
-	if owner.Mode == "release" && os.Getenv("PUBLICATION_COMPLETE") != "true" {
-		fmt.Println("::warning::Release incomplete: retaining lock. Rerun the same workflow run to recover.")
+	if (owner.Mode == "release" || owner.Mode == "recovery") && os.Getenv("PUBLICATION_COMPLETE") != "true" {
+		fmt.Println("::warning::Release incomplete: retaining lock. Rerun this run or use /recover-release-pr<N> from a merged fix PR with the same version label.")
 		return nil
 	}
 	if owner.Mode == "deployment" && os.Getenv("STATE_SAFE") != "true" {
@@ -484,7 +594,8 @@ func (c *controller) backendLockOwner() (*backendLock, ownership, error) {
 }
 
 func (c *controller) backendAcquire() error {
-	record := ownership{os.Getenv("GITHUB_RUN_ID"), c.event.PullRequest.Number, c.registry + "/" + c.image, "deployment"}
+	record := ownership{Run: os.Getenv("GITHUB_RUN_ID"), PR: c.event.PullRequest.Number,
+		Image: c.registry + "/" + c.image, Mode: "deployment"}
 	file, owner, err := c.backendLockOwner()
 	if err != nil {
 		return err
@@ -541,6 +652,10 @@ func (c *controller) ancestor(sha, branch string) (bool, error) {
 }
 
 func (c *controller) version(pr pullRequest, label string) (string, string, bool, error) {
+	return c.versionFor(pr, label, 0)
+}
+
+func (c *controller) versionFor(pr pullRequest, label string, recoveryPR int) (string, string, bool, error) {
 	var tags []struct {
 		Name   string
 		Commit struct{ SHA string }
@@ -586,9 +701,13 @@ func (c *controller) version(pr pullRequest, label string) (string, string, bool
 		if err := json.Unmarshal([]byte(strings.TrimPrefix(tag.Message, "docker-release\n")), &record); err != nil {
 			return "", "", false, errors.New("invalid recorded release metadata")
 		}
-		if record.Repository == c.event.Repository.FullName && record.Image == c.registry+"/"+c.image &&
-			record.PR == pr.Number && record.SHA == pr.MergeCommitSHA {
-			return strings.TrimPrefix(item.Name, "v"), record.Digest, true, nil
+		if record.Repository == c.event.Repository.FullName && record.Image == c.registry+"/"+c.image && record.PR == pr.Number {
+			if record.SHA == pr.MergeCommitSHA && record.RecoveryPR == recoveryPR {
+				return strings.TrimPrefix(item.Name, "v"), record.Digest, true, nil
+			}
+			if recoveryPR > 0 {
+				return "", "", false, errors.New("the failed PR already has a recorded release; rerun that release instead of recovering it")
+			}
 		}
 	}
 	var branch struct{ Commit struct{ SHA string } }
@@ -619,6 +738,198 @@ func (c *controller) version(pr pullRequest, label string) (string, string, bool
 	}
 	next, err := nextVersion(current, label)
 	return next, "", false, err
+}
+
+func (c *controller) prepareRecovery(fixPR pullRequest, releasePRNumber int) error {
+	if releasePRNumber == fixPR.Number {
+		return errors.New("recovery PR must differ from the failed release PR")
+	}
+	if !fixPR.Merged || fixPR.MergeCommitSHA == "" || fixPR.Base.Ref != os.Getenv("RELEASE_BRANCH") ||
+		fixPR.Head.Repo.FullName != c.event.Repository.FullName {
+		return errors.New("recovery must run from a merged same-repository fix PR targeting the release branch")
+	}
+	if !shaPattern.MatchString(fixPR.MergeCommitSHA) {
+		return errors.New("recovery PR has an invalid merge SHA")
+	}
+	releasePR, err := c.pullRequest(releasePRNumber)
+	if err != nil {
+		return err
+	}
+	if !releasePR.Merged || releasePR.MergeCommitSHA == "" || releasePR.Base.Ref != os.Getenv("RELEASE_BRANCH") {
+		return errors.New("referenced release PR is not merged into the release branch")
+	}
+	label, err := selectedLabel(releasePR.Labels)
+	if err != nil {
+		return err
+	}
+	if label == "" {
+		return errors.New("referenced release PR no longer has a major, minor or patch label")
+	}
+	fixLabel, err := selectedLabel(fixPR.Labels)
+	if err != nil {
+		return err
+	}
+	if fixLabel != label {
+		return errors.New("fix PR must have the same major, minor or patch label as the failed PR")
+	}
+	includesRelease, err := c.ancestor(releasePR.MergeCommitSHA, fixPR.MergeCommitSHA)
+	if err != nil {
+		return err
+	}
+	if !includesRelease {
+		return errors.New("fix PR merge commit does not contain the failed release commit")
+	}
+	var branch struct{ Commit struct{ SHA string } }
+	status, err := c.github("GET", "/branches/"+url.PathEscape(os.Getenv("RELEASE_BRANCH")), nil, &branch)
+	if err != nil {
+		return err
+	}
+	if status == http.StatusNotFound || branch.Commit.SHA == "" {
+		return errors.New("release branch not found")
+	}
+	onReleaseBranch, err := c.ancestor(fixPR.MergeCommitSHA, branch.Commit.SHA)
+	if err != nil {
+		return err
+	}
+	if !onReleaseBranch {
+		return errors.New("recovery merge commit is not on the release branch")
+	}
+	lock, err := c.ref(c.lockName())
+	if err != nil {
+		return err
+	}
+	if lock == nil {
+		return c.note(fmt.Sprintf("Recovery skipped: no failed release lock exists for PR #%d; no image was built and no lock was changed.", releasePRNumber))
+	}
+	held, err := c.owner(lock)
+	if err != nil {
+		return err
+	}
+	validReleaseLock := held.Mode == "release" && held.PR == releasePRNumber &&
+		held.Image == c.registry+"/"+c.image && (held.Label == "" || held.Label == label)
+	validRecoveryRetry := held.Mode == "recovery" && held.PR == releasePRNumber &&
+		held.RecoveryPR == fixPR.Number && held.Image == c.registry+"/"+c.image && held.Label == label
+	if !validReleaseLock && !validRecoveryRetry {
+		return c.note(fmt.Sprintf("Recovery skipped: the publication lock does not belong to failed release PR #%d; no image was built and no lock was changed.", releasePRNumber))
+	}
+	failed, err := c.failedRun(held.Run)
+	if err != nil {
+		return err
+	}
+	if !failed {
+		return c.note(fmt.Sprintf("Recovery skipped: the workflow for PR #%d is not confirmed failed; no image was built and no lock was changed.", releasePRNumber))
+	}
+	_, _, alreadyReleased, err := c.versionFor(releasePR, label, 0)
+	if err != nil {
+		return err
+	}
+	if alreadyReleased {
+		return c.note(fmt.Sprintf("Recovery skipped: PR #%d already has a recorded release; rerun its original workflow to finish and release the lock.", releasePRNumber))
+	}
+	c.recovery = &recoveryRequest{ReleasePR: releasePRNumber, RecoveryPR: fixPR.Number, Label: label}
+	c.releaseLabel = label
+	if err := c.acquire(fixPR.MergeCommitSHA, "recovery"); err != nil {
+		return err
+	}
+	versionRequest := releasePR
+	versionRequest.MergeCommitSHA = fixPR.MergeCommitSHA
+	tag, digest, recorded, err := c.versionFor(versionRequest, label, fixPR.Number)
+	if err != nil {
+		return err
+	}
+	if len(tag) > 128 {
+		return errors.New("generated version exceeds the Docker image tag length limit")
+	}
+	for _, item := range [][2]string{
+		{"mode", "recovery"}, {"sha", fixPR.MergeCommitSHA}, {"tag", tag}, {"digest", digest},
+		{"image", c.registry + "/" + c.image + ":" + tag}, {"publish", fmt.Sprint(!recorded)},
+		{"build", "true"}, {"preview", "false"}, {"pr", fmt.Sprint(releasePRNumber)},
+		{"release_pr", fmt.Sprint(releasePRNumber)}, {"recovery_pr", fmt.Sprint(fixPR.Number)}, {"release_label", label},
+	} {
+		if err := output(item[0], item[1]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c *controller) recordReleaseTag(record releaseRecord, version, sha string) error {
+	ref, err := c.ref("v" + version)
+	if err != nil {
+		return err
+	}
+	if ref != nil {
+		existing, err := c.tag(ref)
+		if err != nil {
+			return err
+		}
+		var prior releaseRecord
+		if !strings.HasPrefix(existing.Message, "docker-release\n") {
+			return errors.New("version tag is not owned by this release")
+		}
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(existing.Message, "docker-release\n")), &prior); err != nil {
+			return err
+		}
+		if prior != record || existing.Object.SHA != sha {
+			return errors.New("version tag belongs to a different publication or image digest")
+		}
+		return nil
+	}
+	data, err := json.Marshal(record)
+	if err != nil {
+		return err
+	}
+	tagSHA, err := c.createTag("v"+version, sha, "docker-release\n"+string(data))
+	if err != nil {
+		return err
+	}
+	_, err = c.github("POST", "/git/refs", map[string]string{"ref": "refs/tags/v" + version, "sha": tagSHA}, nil)
+	return err
+}
+
+func (c *controller) recoveryReleaseRecorded(pr pullRequest) (bool, error) {
+	for page := 1; ; page++ {
+		var batch []struct {
+			Name string
+		}
+		status, err := c.github("GET", fmt.Sprintf("/tags?per_page=100&page=%d", page), nil, &batch)
+		if err != nil {
+			return false, err
+		}
+		if status == http.StatusNotFound {
+			return false, errors.New("Git tags unavailable")
+		}
+		for _, item := range batch {
+			if versionParts(item.Name) == nil {
+				continue
+			}
+			ref, err := c.ref(item.Name)
+			if err != nil {
+				return false, err
+			}
+			if ref == nil || ref.Object.Type != "tag" {
+				continue
+			}
+			tag, err := c.tag(ref)
+			if err != nil {
+				return false, err
+			}
+			if !strings.HasPrefix(tag.Message, "docker-release\n") {
+				continue
+			}
+			var record releaseRecord
+			if err := json.Unmarshal([]byte(strings.TrimPrefix(tag.Message, "docker-release\n")), &record); err != nil {
+				return false, errors.New("invalid recorded release metadata")
+			}
+			if record.Repository == c.event.Repository.FullName && record.Image == c.registry+"/"+c.image &&
+				record.RecoveryPR == pr.Number && record.SHA == pr.MergeCommitSHA {
+				return true, nil
+			}
+		}
+		if len(batch) < 100 {
+			return false, nil
+		}
+	}
 }
 
 func validatePreviewSource(expected, actual string, preview bool) error {
@@ -652,6 +963,11 @@ func (c *controller) prepare() error {
 	pr, err := c.pr()
 	if err != nil {
 		return err
+	}
+	if releasePRNumber, recovery, err := recoveryTarget(command); err != nil {
+		return err
+	} else if recovery {
+		return c.prepareRecovery(pr, releasePRNumber)
 	}
 	label, err := selectedLabel(pr.Labels)
 	if err != nil {
@@ -690,6 +1006,26 @@ func (c *controller) prepare() error {
 		if label != mergedLabel {
 			return errors.New("release label must match the single label recorded at merge time")
 		}
+		recovered, err := c.recoveryReleaseRecorded(pr)
+		if err != nil {
+			return err
+		}
+		if recovered {
+			return c.note("Release skipped: this PR's merge was already published through recovery.")
+		}
+		lock, err := c.ref(c.lockName())
+		if err != nil {
+			return err
+		}
+		if lock != nil {
+			owner, err := c.owner(lock)
+			if err != nil {
+				return err
+			}
+			if owner.PR != pr.Number || owner.Mode != "release" || owner.Image != c.registry+"/"+c.image {
+				return c.note(fmt.Sprintf("Release skipped: publication is blocked by release PR #%d. After its fix PR merges with the same version label, comment /recover-release-pr%d there.", owner.PR, owner.PR))
+			}
+		}
 	}
 	sha, mode := pr.Head.SHA, "pr"
 	if err := validatePreviewSource(os.Getenv("EXPECTED_PREVIEW_SHA"), sha, command == "/combine-deploy"); err != nil {
@@ -697,6 +1033,7 @@ func (c *controller) prepare() error {
 	}
 	if release {
 		sha, mode = pr.MergeCommitSHA, "release"
+		c.releaseLabel = label
 	}
 
 	if !shaPattern.MatchString(sha) {
@@ -728,7 +1065,7 @@ func (c *controller) prepare() error {
 	tag := prTag(pr.Number, sha)
 	digest, recorded := "", false
 	if release {
-		tag, digest, recorded, err = c.version(fresh, label)
+		tag, digest, recorded, err = c.versionFor(fresh, label, 0)
 		if err != nil {
 			return err
 		}
@@ -943,16 +1280,19 @@ func contains(tags []string, wanted string) bool {
 
 func (c *controller) finalize() error {
 	mode, sha, tag, digest := os.Getenv("BUILD_MODE"), os.Getenv("BUILD_SHA"), os.Getenv("BUILD_TAG"), os.Getenv("BUILD_DIGEST")
-	if (mode != "pr" && mode != "release") || !shaPattern.MatchString(sha) || !digestPattern.MatchString(digest) {
+	if (mode != "pr" && mode != "release" && mode != "recovery") || !shaPattern.MatchString(sha) || !digestPattern.MatchString(digest) {
 		return errors.New("invalid publication metadata")
 	}
 	if mode == "pr" && tag != prTag(c.event.PullRequest.Number, sha) {
 		return errors.New("invalid PR image tag")
 	}
-	if mode == "release" && !versionPattern.MatchString(tag) {
+	if (mode == "release" || mode == "recovery") && !versionPattern.MatchString(tag) {
 		return errors.New("invalid release image tag")
 	}
-	if mode == "release" {
+	releasePRNumber, _ := strconv.Atoi(os.Getenv("BUILD_RELEASE_PR"))
+	recoveryPRNumber, _ := strconv.Atoi(os.Getenv("BUILD_RECOVERY_PR"))
+	releaseLabel := os.Getenv("BUILD_RELEASE_LABEL")
+	if mode == "release" || mode == "recovery" {
 		ref, err := c.ref(c.lockName())
 		if err != nil {
 			return err
@@ -964,8 +1304,15 @@ func (c *controller) finalize() error {
 		if err != nil {
 			return err
 		}
-		if owner != (ownership{os.Getenv("GITHUB_RUN_ID"), c.event.PullRequest.Number, c.registry + "/" + c.image, mode}) {
+		if owner.Run != os.Getenv("GITHUB_RUN_ID") || owner.Image != c.registry+"/"+c.image || owner.Mode != mode {
 			return errors.New("publication lock belongs to another publisher")
+		}
+		if mode == "release" && owner.PR != c.event.PullRequest.Number {
+			return errors.New("release lock belongs to another PR")
+		}
+		if mode == "recovery" && (releasePRNumber < 1 || recoveryPRNumber != c.event.PullRequest.Number ||
+			owner.PR != releasePRNumber || owner.RecoveryPR != recoveryPRNumber || owner.Label != releaseLabel) {
+			return errors.New("recovery lock does not match the failed release and fix PR")
 		}
 	}
 	registry, err := c.registryClient()
@@ -1013,45 +1360,60 @@ func (c *controller) finalize() error {
 		if !pr.Merged || pr.MergeCommitSHA != sha || currentLabel == "" || currentLabel != mergedLabel {
 			return errors.New("merged status, commit or release label changed; refusing to record a release tag")
 		}
-		record := releaseRecord{c.event.Repository.FullName, c.registry + "/" + c.image, c.event.PullRequest.Number, sha, digest}
-		ref, err := c.ref("v" + tag)
-		if err != nil {
+		record := releaseRecord{Repository: c.event.Repository.FullName, Image: c.registry + "/" + c.image,
+			PR: c.event.PullRequest.Number, SHA: sha, Digest: digest}
+		if err := c.recordReleaseTag(record, tag, sha); err != nil {
 			return err
-		}
-		if ref != nil {
-			existing, err := c.tag(ref)
-			if err != nil {
-				return err
-			}
-			var prior releaseRecord
-			if !strings.HasPrefix(existing.Message, "docker-release\n") {
-				return errors.New("version tag is not owned by this release")
-			}
-			if err := json.Unmarshal([]byte(strings.TrimPrefix(existing.Message, "docker-release\n")), &prior); err != nil {
-				return err
-			}
-			if prior != record || existing.Object.SHA != sha {
-				return errors.New("version tag belongs to a different publication or image digest")
-			}
-		} else {
-			data, err := json.Marshal(record)
-			if err != nil {
-				return err
-			}
-			tagSHA, err := c.createTag("v"+tag, sha, "docker-release\n"+string(data))
-			if err != nil {
-				return err
-			}
-			if _, err := c.github("POST", "/git/refs", map[string]string{"ref": "refs/tags/v" + tag, "sha": tagSHA}, nil); err != nil {
-				return err
-			}
 		}
 		fmt.Printf("Recorded v%s on merged release-branch commit %s.\n", tag, sha)
-		pr, err = c.pr()
+	} else if mode == "recovery" {
+		if releaseLabel != "major" && releaseLabel != "minor" && releaseLabel != "patch" {
+			return errors.New("recovery is missing the original release label")
+		}
+		originalPR, err := c.pullRequest(releasePRNumber)
 		if err != nil {
 			return err
 		}
-		if !pr.Merged || pr.MergeCommitSHA != sha {
+		fixPR, err := c.pr()
+		if err != nil {
+			return err
+		}
+		originalLabel, err := selectedLabel(originalPR.Labels)
+		if err != nil {
+			return err
+		}
+		fixLabel, err := selectedLabel(fixPR.Labels)
+		if err != nil {
+			return err
+		}
+		if !originalPR.Merged || originalLabel != releaseLabel || !fixPR.Merged || fixPR.MergeCommitSHA != sha ||
+			fixPR.Base.Ref != os.Getenv("RELEASE_BRANCH") || fixLabel != releaseLabel {
+			return errors.New("failed release or recovery PR changed before finalize")
+		}
+		includesRelease, err := c.ancestor(originalPR.MergeCommitSHA, sha)
+		if err != nil {
+			return err
+		}
+		if !includesRelease {
+			return errors.New("recovery commit no longer contains the failed release commit")
+		}
+		record := releaseRecord{Repository: c.event.Repository.FullName, Image: c.registry + "/" + c.image,
+			PR: releasePRNumber, SHA: sha, Digest: digest, RecoveryPR: recoveryPRNumber}
+		if err := c.recordReleaseTag(record, tag, sha); err != nil {
+			return err
+		}
+		fmt.Printf("Recovered v%s for PR #%d using fix PR #%d at %s.\n", tag, releasePRNumber, recoveryPRNumber, sha)
+	}
+	if mode == "release" || mode == "recovery" {
+		prNumber := c.event.PullRequest.Number
+		if mode == "recovery" {
+			prNumber = releasePRNumber
+		}
+		pr, err := c.pullRequest(prNumber)
+		if err != nil {
+			return err
+		}
+		if !pr.Merged || (mode == "release" && pr.MergeCommitSHA != sha) {
 			return errors.New("PR is not merged at the published release commit")
 		}
 		title := regexp.MustCompile(` \[image: v?[0-9]+\.[0-9]+\.[0-9]+\]$`).ReplaceAllString(pr.Title, "")
@@ -1401,7 +1763,8 @@ func (c *controller) deploymentComplete() error {
 	if err != nil {
 		return err
 	}
-	if file == nil || owner != (ownership{os.Getenv("GITHUB_RUN_ID"), c.event.PullRequest.Number, c.registry + "/" + c.image, "deployment"}) {
+	if file == nil || owner.Run != os.Getenv("GITHUB_RUN_ID") || owner.PR != c.event.PullRequest.Number ||
+		owner.Image != c.registry+"/"+c.image || owner.Mode != "deployment" {
 		return errors.New("backend deployment lock is missing or belongs to another run")
 	}
 	namespace, name := os.Getenv("ARGOCD_NAMESPACE"), os.Getenv("DEPLOY_NAME")

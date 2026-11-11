@@ -84,11 +84,12 @@ jobs:
     # Do not use pull_request_target to build untrusted PR Dockerfiles.
     if: >-
       (github.event_name == 'issue_comment' && github.event.action == 'created' && github.event.issue.pull_request &&
-       contains(fromJSON('["/major","/minor","/patch","/combine-deploy"]'), github.event.comment.body)) ||
+       (contains(fromJSON('["/major","/minor","/patch","/combine-deploy"]'), github.event.comment.body) ||
+        startsWith(github.event.comment.body, '/recover-release-pr'))) ||
       (github.event_name == 'pull_request' && github.event.action == 'closed' &&
        github.event.pull_request.merged &&
        github.event.pull_request.head.repo.full_name == github.repository &&
-       github.event.pull_request.base.ref == inputs.release_branch)
+        github.event.pull_request.base.ref == inputs.release_branch)
     runs-on: ${{ fromJSON(inputs.runs_on) }}
     timeout-minutes: 90
     concurrency:
@@ -179,7 +180,7 @@ jobs:
           set -euo pipefail
           key="$(printf '%s\0' "$IMAGE_REGISTRY" "$IMAGE_REPOSITORY" "$CACHE_CONTEXT" "$CACHE_DOCKERFILE" "$CACHE_PLATFORMS" | sha256sum | cut -d' ' -f1)"
           release_scope="docker-${key}-release"
-          if [[ "$CACHE_MODE" == "release" ]]; then
+          if [[ "$CACHE_MODE" == "release" || "$CACHE_MODE" == "recovery" ]]; then
             write_scope="$release_scope"
           else
             write_scope="docker-${key}-pr-${CACHE_PR}"
@@ -224,6 +225,9 @@ jobs:
           BUILD_MODE: ${{ steps.prepare.outputs.mode }}
           BUILD_PREVIEW: ${{ steps.prepare.outputs.preview }}
           BUILD_DIGEST: ${{ steps.publish.outputs.digest || steps.prepare.outputs.digest }}
+          BUILD_RELEASE_PR: ${{ steps.prepare.outputs.release_pr }}
+          BUILD_RECOVERY_PR: ${{ steps.prepare.outputs.recovery_pr }}
+          BUILD_RELEASE_LABEL: ${{ steps.prepare.outputs.release_label }}
         with:
           operation: finalize
 

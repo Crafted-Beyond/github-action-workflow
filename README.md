@@ -329,6 +329,23 @@ from reusing that version until the same workflow run is rerun successfully.
 The label on a merged PR must still match the single label captured in the merge
 event; changing labels afterward is rejected.
 
+If the merged release commit contains a code defect that requires a follow-up
+fix PR, add the **same** `major`, `minor` or `patch` label to the fix PR, merge
+it, then comment `/recover-release-pr<N>` on that merged fix PR, replacing `N`
+with the failed release PR number. For example, `/recover-release-pr123` recovers
+the release request from PR 123. The recovery command does not create a temporary
+`pr-<sha>` image. It builds the fix PR's merged commit as the original release,
+keeps the original release label/version sequence, and records both PR numbers
+in the annotated version tag.
+
+Recovery is skipped without changing the lock if the lock is absent, belongs to
+another release, the failed run is still active or succeeded, the fix commit does
+not contain the failed release commit, the labels differ, or that PR already has
+a recorded release tag. The original failed run should be rerun when its version
+tag already exists, so it can finish idempotently and release its own lock. After
+a successful recovery, the fix PR's ordinary merge event detects the recovery
+tag and skips a duplicate version bump.
+
 ### Inputs and secrets
 
 | Input | Default | Purpose |
