@@ -21,7 +21,7 @@ on:
         required: false
         default: "{}"
       secret_var_mappings:
-        description: Newline-separated Ansible variable=caller secret name mappings
+        description: Newline-separated Ansible variable=caller secret name mappings; a trailing ? (variable=SECRET?) skips a secret that is not set
         type: string
         required: false
         default: ""

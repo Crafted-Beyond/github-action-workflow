@@ -21,7 +21,7 @@ inputs:
     description: JSON object of nonsecret Ansible variables.
     default: "{}"
   secret_var_mappings:
-    description: Newline-separated Ansible variable=caller secret name mappings.
+    description: Newline-separated Ansible variable=caller secret name mappings; a trailing ? (variable=SECRET?) skips a secret that is not set.
     default: ""
   caller_secrets_json:
     description: JSON object containing caller secrets, passed without logging.
@@ -94,10 +94,15 @@ runs:
             variable_name, separator, secret_name = mapping.partition("=")
             if not separator or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", variable_name):
                 raise SystemExit(f"Invalid secret variable mapping: {mapping!r}")
+            # A trailing ? marks an optional secret: skipped when not set.
+            optional = secret_name.endswith("?")
+            secret_name = secret_name.removesuffix("?")
             if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", secret_name):
                 raise SystemExit(f"Invalid caller secret name in mapping: {secret_name!r}")
             secret_value = caller_secrets.get(secret_name)
             if not secret_value:
+                if optional:
+                    continue
                 raise SystemExit(f"Required caller secret is missing: {secret_name}")
             extra_vars[variable_name] = secret_value
 
