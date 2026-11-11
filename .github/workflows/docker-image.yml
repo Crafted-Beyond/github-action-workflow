@@ -283,6 +283,8 @@ jobs:
       IMAGE_REGISTRY: ${{ inputs.registry }}
       REGISTRY_ADAPTER: ${{ inputs.registry_adapter }}
       REGISTRY_CLEANUP_SCRIPT: ${{ inputs.registry_cleanup_script }}
+      REGISTRY_USERNAME: ${{ secrets.registry_username }}
+      REGISTRY_PASSWORD: ${{ secrets.registry_password }}
       RELEASE_BRANCH: ${{ inputs.release_branch }}
     steps:
       - name: Validate recovery request and clear failed release lock
