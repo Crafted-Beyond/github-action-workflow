@@ -84,8 +84,7 @@ jobs:
     # Do not use pull_request_target to build untrusted PR Dockerfiles.
     if: >-
       (github.event_name == 'issue_comment' && github.event.action == 'created' && github.event.issue.pull_request &&
-       (contains(fromJSON('["/major","/minor","/patch","/combine-deploy"]'), github.event.comment.body) ||
-        startsWith(github.event.comment.body, '/recover-release-pr'))) ||
+       contains(fromJSON('["/major","/minor","/patch","/combine-deploy"]'), github.event.comment.body)) ||
       (github.event_name == 'pull_request' && github.event.action == 'closed' &&
        github.event.pull_request.merged &&
        github.event.pull_request.head.repo.full_name == github.repository &&
@@ -264,3 +263,29 @@ jobs:
         uses: Crafted-Beyond/github-action-workflow/.github/actions/docker-release@main
         with:
           operation: build-cleanup
+
+  recover-release:
+    name: Recover failed release lock
+    if: >-
+      github.event_name == 'issue_comment' && github.event.action == 'created' &&
+      github.event.issue.pull_request && startsWith(github.event.comment.body, '/recover-release-pr')
+    runs-on: ${{ fromJSON(inputs.runs_on) }}
+    timeout-minutes: 10
+    concurrency:
+      group: combine-recovery-${{ github.repository }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ secrets.GH_TOKEN }}
+      IMAGE_REPOSITORY: ${{ inputs.image }}
+      IMAGE_REGISTRY: ${{ inputs.registry }}
+      REGISTRY_ADAPTER: ${{ inputs.registry_adapter }}
+      REGISTRY_CLEANUP_SCRIPT: ${{ inputs.registry_cleanup_script }}
+      RELEASE_BRANCH: ${{ inputs.release_branch }}
+    steps:
+      - name: Validate recovery request and clear failed release lock
+        uses: Crafted-Beyond/github-action-workflow/.github/actions/docker-release@main
+        with:
+          operation: prepare

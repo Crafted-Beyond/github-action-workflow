@@ -824,33 +824,30 @@ func (c *controller) prepareRecovery(fixPR pullRequest, releasePRNumber int) err
 		return err
 	}
 	if alreadyReleased {
-		return c.note(fmt.Sprintf("Recovery skipped: PR #%d already has a recorded release; rerun its original workflow to finish and release the lock.", releasePRNumber))
+		// The version tag proves image publication already completed. The lock
+		// is now stale; releasing it lets the merged fix PR's normal release run proceed.
 	}
-	c.recovery = &recoveryRequest{ReleasePR: releasePRNumber, RecoveryPR: fixPR.Number, Label: label}
-	c.releaseLabel = label
-	if err := c.acquire(fixPR.MergeCommitSHA, "recovery"); err != nil {
-		return err
-	}
-	versionRequest := releasePR
-	versionRequest.MergeCommitSHA = fixPR.MergeCommitSHA
-	tag, digest, recorded, err := c.versionFor(versionRequest, label, fixPR.Number)
+	currentLock, err := c.ref(c.lockName())
 	if err != nil {
 		return err
 	}
-	if len(tag) > 128 {
-		return errors.New("generated version exceeds the Docker image tag length limit")
+	if currentLock == nil {
+		return c.note(fmt.Sprintf("Recovery skipped: the lock for release PR #%d is already gone; no image was built.", releasePRNumber))
 	}
-	for _, item := range [][2]string{
-		{"mode", "recovery"}, {"sha", fixPR.MergeCommitSHA}, {"tag", tag}, {"digest", digest},
-		{"image", c.registry + "/" + c.image + ":" + tag}, {"publish", fmt.Sprint(!recorded)},
-		{"build", "true"}, {"preview", "false"}, {"pr", fmt.Sprint(releasePRNumber)},
-		{"release_pr", fmt.Sprint(releasePRNumber)}, {"recovery_pr", fmt.Sprint(fixPR.Number)}, {"release_label", label},
-	} {
-		if err := output(item[0], item[1]); err != nil {
-			return err
-		}
+	currentOwner, err := c.owner(currentLock)
+	if err != nil {
+		return err
 	}
-	return nil
+	if currentOwner != held {
+		return c.note(fmt.Sprintf("Recovery skipped: the lock owner changed while checking release PR #%d; no lock was removed.", releasePRNumber))
+	}
+	if _, err := c.github("DELETE", "/git/refs/tags/"+c.lockName(), nil, nil); err != nil {
+		return err
+	}
+	if alreadyReleased {
+		return c.note(fmt.Sprintf("Recovery cleared the stale lock for PR #%d. Its versioned image was already recorded; no image was built.", releasePRNumber))
+	}
+	return c.note(fmt.Sprintf("Recovery cleared the failed release lock for PR #%d. No image was built; the merged fix PR's normal release run can now continue. If no run is waiting, rerun that merged-PR workflow.", releasePRNumber))
 }
 
 func (c *controller) recordReleaseTag(record releaseRecord, version, sha string) error {
@@ -1012,19 +1009,6 @@ func (c *controller) prepare() error {
 		}
 		if recovered {
 			return c.note("Release skipped: this PR's merge was already published through recovery.")
-		}
-		lock, err := c.ref(c.lockName())
-		if err != nil {
-			return err
-		}
-		if lock != nil {
-			owner, err := c.owner(lock)
-			if err != nil {
-				return err
-			}
-			if owner.PR != pr.Number || owner.Mode != "release" || owner.Image != c.registry+"/"+c.image {
-				return c.note(fmt.Sprintf("Release skipped: publication is blocked by release PR #%d. After its fix PR merges with the same version label, comment /recover-release-pr%d there.", owner.PR, owner.PR))
-			}
 		}
 	}
 	sha, mode := pr.Head.SHA, "pr"
