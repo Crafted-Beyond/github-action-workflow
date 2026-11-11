@@ -44,6 +44,31 @@ func TestDeploymentHealthAfterNoOpConfigurationChange(t *testing.T) {
 	}
 }
 
+func TestDeploymentSyncFailure(t *testing.T) {
+	start := time.Date(2026, 11, 11, 10, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name, json string
+		want       syncFailure
+	}{
+		{"succeeded", `{"status":{"operationState":{"phase":"Succeeded","startedAt":"2026-11-11T10:00:05Z"}}}`, syncNotFailed},
+		{"running retry", `{"status":{"operationState":{"phase":"Running","startedAt":"2026-11-11T10:00:05Z"}}}`, syncNotFailed},
+		{"no operation yet", `{"status":{}}`, syncNotFailed},
+		{"failed before this deploy", `{"status":{"operationState":{"phase":"Failed","startedAt":"2026-11-11T09:40:00Z","message":"not permitted"}}}`, syncFailedBefore},
+		{"failed in this deploy", `{"status":{"operationState":{"phase":"Failed","startedAt":"2026-11-11T10:00:05Z","message":"not permitted"}}}`, syncFailedNow},
+		{"error in this deploy", `{"status":{"operationState":{"phase":"Error","startedAt":"2026-11-11T10:00:00Z"}}}`, syncFailedNow},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var app deploymentApplication
+			if err := json.Unmarshal([]byte(tc.json), &app); err != nil {
+				t.Fatal(err)
+			}
+			if got := app.syncFailure(start); got != tc.want {
+				t.Fatalf("syncFailure()=%d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestVirtualServiceGateways(t *testing.T) {
 	for _, tc := range []struct {
 		name, gateways, destination string

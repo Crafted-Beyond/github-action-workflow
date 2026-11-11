@@ -1770,7 +1770,7 @@ func (c *controller) deploymentComplete() error {
 	if _, err := kubectl("-n", namespace, "annotate", "application", name, "argocd.argoproj.io/refresh=hard", "--overwrite"); err != nil {
 		return err
 	}
-	healthy := false
+	healthy, resynced := false, false
 	for attempt := 0; attempt < 120; attempt++ {
 		data, err := kubectl("-n", namespace, "get", "application", name, "-o", "json")
 		if err != nil {
@@ -1779,6 +1779,21 @@ func (c *controller) deploymentComplete() error {
 		var app deploymentApplication
 		if err := json.Unmarshal(data, &app); err != nil {
 			return errors.New("invalid Argo CD Application response")
+		}
+		switch app.syncFailure(start) {
+		case syncFailedNow:
+			return fmt.Errorf("Argo CD sync failed: %s", app.Status.OperationState.Message)
+		case syncFailedBefore:
+			// Automated sync never re-tries a commit whose sync already
+			// failed, even once the cause is fixed; start one new sync.
+			if !resynced {
+				if _, err := kubectl("-n", namespace, "patch", "application", name, "--type", "merge", "-p",
+					`{"operation":{"initiatedBy":{"username":"combine-release"},"sync":{}}}`); err != nil {
+					return err
+				}
+				fmt.Println("Previous Argo CD sync had failed; started a new sync.")
+				resynced = true
+			}
 		}
 		if app.readySince(start) {
 			ready := true
@@ -1818,12 +1833,32 @@ type deploymentApplication struct {
 			ComparedTo struct{ Source map[string]any } `json:"comparedTo"`
 		} `json:"sync"`
 		OperationState struct {
-			Phase      string `json:"phase"`
+			Phase      string    `json:"phase"`
+			Message    string    `json:"message"`
+			StartedAt  time.Time `json:"startedAt"`
 			SyncResult struct {
 				Revision string `json:"revision"`
 			} `json:"syncResult"`
 		} `json:"operationState"`
 	} `json:"status"`
+}
+
+type syncFailure int
+
+const (
+	syncNotFailed    syncFailure = iota
+	syncFailedBefore             // the last sync failed before this deploy began
+	syncFailedNow                // this deploy's sync failed (after any Argo CD retries)
+)
+
+func (app deploymentApplication) syncFailure(start time.Time) syncFailure {
+	if phase := app.Status.OperationState.Phase; phase != "Failed" && phase != "Error" {
+		return syncNotFailed
+	}
+	if app.Status.OperationState.StartedAt.Before(start) {
+		return syncFailedBefore
+	}
+	return syncFailedNow
 }
 
 func (app deploymentApplication) readySince(start time.Time) bool {
