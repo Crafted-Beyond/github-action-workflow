@@ -70,6 +70,9 @@ on:
       tofu_env:
         description: Optional KEY=VALUE lines exported to the job, for example TF_VAR_github_token=....
         required: false
+      kubeconfig:
+        description: Optional kubeconfig for the Kubernetes provider. Written to a private file in RUNNER_TEMP and exported as KUBECONFIG and TF_VAR_kubeconfig_path; removed when the job ends.
+        required: false
 
 concurrency:
   group: tofu-${{ inputs.state_repository }}-${{ inputs.state_path || github.event.repository.name }}-${{ inputs.environment }}
@@ -87,6 +90,7 @@ jobs:
       contents: read
       pull-requests: write
     env:
+      HAS_KUBECONFIG: ${{ secrets.kubeconfig != '' }}
       STATE_PATH: ${{ format('{0}{1}', inputs.state_path || github.event.repository.name, inputs.environment != '' && format('/{0}', inputs.environment) || '') }}
     outputs:
       has_changes: ${{ steps.plan.outputs.has_changes }}
@@ -102,6 +106,17 @@ jobs:
           env: |
             ${{ secrets.tofu_env }}
             ${{ inputs.github_token_env != '' && format('{0}={1}', inputs.github_token_env, secrets.GH_TOKEN) || '' }}
+
+      - name: Write Kubeconfig (masked)
+        if: ${{ env.HAS_KUBECONFIG == 'true' }}
+        shell: bash
+        env:
+          CLUSTER_CONFIG: ${{ secrets.kubeconfig }}
+        run: |
+          umask 077
+          export KUBECONFIG="$RUNNER_TEMP/tofu-kubeconfig"
+          printf '%s\n' "$CLUSTER_CONFIG" > "$KUBECONFIG"
+          printf 'KUBECONFIG=%s\nTF_VAR_kubeconfig_path=%s\n' "$KUBECONFIG" "$KUBECONFIG" >> "$GITHUB_ENV"
 
       - name: Install OpenTofu (${{ inputs.tofu_version }})
         uses: Crafted-Beyond/github-action-workflow/.github/actions/setup-tofu@main
@@ -144,6 +159,11 @@ jobs:
           body_file: ${{ steps.plan.outputs.summary_file }}
           marker: tofu-plan:${{ env.STATE_PATH }}
 
+      - name: Remove Kubeconfig
+        if: ${{ always() }}
+        shell: bash
+        run: rm -f "$RUNNER_TEMP/tofu-kubeconfig"
+
       - name: Clean Up Secrets, State and Credentials
         if: ${{ always() }}
         uses: Crafted-Beyond/github-action-workflow/.github/actions/cleanup@main
@@ -159,6 +179,7 @@ jobs:
     permissions:
       contents: read
     env:
+      HAS_KUBECONFIG: ${{ secrets.kubeconfig != '' }}
       STATE_PATH: ${{ format('{0}{1}', inputs.state_path || github.event.repository.name, inputs.environment != '' && format('/{0}', inputs.environment) || '') }}
     steps:
       - name: Checkout ${{ github.repository }}
@@ -172,6 +193,17 @@ jobs:
           env: |
             ${{ secrets.tofu_env }}
             ${{ inputs.github_token_env != '' && format('{0}={1}', inputs.github_token_env, secrets.GH_TOKEN) || '' }}
+
+      - name: Write Kubeconfig (masked)
+        if: ${{ env.HAS_KUBECONFIG == 'true' }}
+        shell: bash
+        env:
+          CLUSTER_CONFIG: ${{ secrets.kubeconfig }}
+        run: |
+          umask 077
+          export KUBECONFIG="$RUNNER_TEMP/tofu-kubeconfig"
+          printf '%s\n' "$CLUSTER_CONFIG" > "$KUBECONFIG"
+          printf 'KUBECONFIG=%s\nTF_VAR_kubeconfig_path=%s\n' "$KUBECONFIG" "$KUBECONFIG" >> "$GITHUB_ENV"
 
       - name: Install OpenTofu (${{ inputs.tofu_version }})
         uses: Crafted-Beyond/github-action-workflow/.github/actions/setup-tofu@main
@@ -215,6 +247,11 @@ jobs:
           state_path: ${{ env.STATE_PATH }}
           ref: ${{ inputs.state_ref }}
           working_directory: ${{ inputs.working_directory }}
+
+      - name: Remove Kubeconfig
+        if: ${{ always() }}
+        shell: bash
+        run: rm -f "$RUNNER_TEMP/tofu-kubeconfig"
 
       - name: Clean Up Secrets, State and Credentials
         if: ${{ always() }}
