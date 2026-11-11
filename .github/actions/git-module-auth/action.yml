@@ -19,6 +19,9 @@ runs:
         config="$RUNNER_TEMP/tofu-gitconfig"
         umask 077
         : > "$config"
-        encoded="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')"
-        git config --file "$config" "http.${GITHUB_SERVER_URL}/.extraheader" "AUTHORIZATION: basic $encoded"
+        # A URL rewrite, not an http.extraheader: git sends these credentials only
+        # when the server asks for them, so actions/checkout's own Authorization
+        # header (state pull and push) is never duplicated (GitHub answers 400).
+        host="${GITHUB_SERVER_URL#https://}"
+        git config --file "$config" "url.https://x-access-token:${GH_TOKEN}@${host}/.insteadOf" "${GITHUB_SERVER_URL}/"
         printf 'GIT_CONFIG_GLOBAL=%s\n' "$config" >> "$GITHUB_ENV"
