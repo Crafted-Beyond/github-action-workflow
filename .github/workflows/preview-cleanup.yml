@@ -47,7 +47,7 @@ jobs:
     timeout-minutes: 45
     environment: preview
     concurrency:
-      group: combine-publication-${{ github.repository }}
+      group: preview-cleanup-${{ github.repository }}-pr-${{ github.event.pull_request.number }}
       cancel-in-progress: false
     permissions:
       contents: write
